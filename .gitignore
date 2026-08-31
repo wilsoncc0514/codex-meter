@@ -1,4 +1,11 @@
 .build/
+.build-arm64/
+.build-x86_64/
+.build-universal/
 build/
 .swiftpm/
+.cache/
+.tmp/
+.local-home/
+dist/
 .DS_Store

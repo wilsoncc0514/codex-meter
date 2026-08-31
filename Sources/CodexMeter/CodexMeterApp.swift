@@ -1,8 +1,11 @@
 import AppKit
 import AVFoundation
 import Combine
+import CodexMeterCore
+import Darwin
+import ServiceManagement
 import SwiftUI
-import UserNotifications
+@preconcurrency import UserNotifications
 
 @main
 struct CodexMeterApp: App {
@@ -25,20 +28,32 @@ private enum PanelMetrics {
     static let screenPadding: CGFloat = 8
 }
 
+private enum CodexSessionPaths {
+    static let roots = [
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions"),
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/archived_sessions")
+    ]
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let quotaStore = QuotaStore()
     private var statusItem: NSStatusItem?
-    private var statusView: CompactStatusItemView?
+    private var statusButton: NSStatusBarButton?
     private var panelWindow: NSPanel?
     private var outsideClickMonitor: Any?
     private var snapshotCancellable: AnyCancellable?
+    private var installationMonitor: Timer?
+    private var launchedExecutableIdentity: ExecutableIdentity?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard enforceSingleInstance() else { return }
+        launchedExecutableIdentity = ExecutableIdentity.current()
         NSApp.setActivationPolicy(.accessory)
         configureStatusItem()
         configurePanelWindow()
         configureWakeRefreshObservers()
+        configureInstallationMonitor()
         quotaStore.start()
 
         snapshotCancellable = quotaStore.$snapshot.sink { [weak self] snapshot in
@@ -48,19 +63,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        installationMonitor?.invalidate()
         stopOutsideClickMonitor()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        quotaStore.syncNotificationAuthorizationStatus()
     }
 
     private func configureStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem = item
-
-        let view = CompactStatusItemView()
-        view.onClick = { [weak self] in
-            self?.togglePanel()
-        }
-        item.view = view
-        statusView = view
+        guard let button = item.button else { return }
+        button.target = self
+        button.action = #selector(togglePanel)
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 5
+        button.setAccessibilityLabel("Codex 额度")
+        statusButton = button
 
         updateStatusItem(with: quotaStore.snapshot)
     }
@@ -107,28 +128,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func updateStatusItem(with snapshot: QuotaSnapshot) {
-        let title = snapshot.isUnavailable ? "未同步" : "\(snapshot.percentText) | \(snapshot.shortResetText)"
-        let tooltip = snapshot.isUnavailable ? "正在等待 Codex 会话额度数据" : "5h 额度剩余 \(snapshot.remainingPercent)% ，距离额度恢复 \(snapshot.resetText)"
-        statusView?.update(
-            title: title,
-            color: snapshot.tagTextColor,
-            backgroundColor: snapshot.tagBackgroundColor,
-            tooltip: tooltip
-        )
-        statusItem?.length = statusView?.frame.width ?? NSStatusItem.variableLength
+    private func configureInstallationMonitor() {
+        installationMonitor = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.relaunchIfExecutableWasReplaced()
+            }
+        }
     }
 
-    private func togglePanel() {
-        guard let statusView, let panelWindow else { return }
+    private func relaunchIfExecutableWasReplaced() {
+        guard let launchedExecutableIdentity,
+              let currentIdentity = ExecutableIdentity.current(),
+              currentIdentity != launchedExecutableIdentity else {
+            return
+        }
+        installationMonitor?.invalidate()
+        installationMonitor = nil
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        NSWorkspace.shared.openApplication(
+            at: Bundle.main.bundleURL,
+            configuration: configuration
+        ) { _, error in
+            guard error == nil else { return }
+            Task { @MainActor in
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    private func updateStatusItem(with snapshot: QuotaSnapshot) {
+        let title = snapshot.menuBarTitle
+        let tooltip = snapshot.isUnavailable
+            ? snapshot.diagnostic.userMessage
+            : "\(snapshot.primaryQuotaShortLabel)额度剩余 \(snapshot.remainingPercent)% · \(snapshot.freshnessLabel) · \(snapshot.resetText)恢复"
+        let attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: snapshot.tagTextColor,
+                .kern: -0.2
+            ]
+        )
+        statusButton?.attributedTitle = attributedTitle
+        statusButton?.layer?.backgroundColor = snapshot.tagBackgroundColor.cgColor
+        statusButton?.toolTip = tooltip
+        statusButton?.setAccessibilityValue(tooltip)
+        statusItem?.length = ceil(attributedTitle.size().width + 12)
+    }
+
+    @objc private func togglePanel() {
+        guard let statusButton, let panelWindow else { return }
 
         if panelWindow.isVisible {
             closePanel()
         } else {
-            positionPanel(relativeTo: statusView)
+            positionPanel(relativeTo: statusButton)
             panelWindow.orderFrontRegardless()
             startOutsideClickMonitor()
             quotaStore.refresh()
+            quotaStore.syncNotificationAuthorizationStatus()
         }
     }
 
@@ -172,68 +231,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func refreshAfterSleepOrUnlock(_ notification: Notification) {
         quotaStore.refresh()
+        quotaStore.syncNotificationAuthorizationStatus()
+    }
+
+    private func enforceSingleInstance() -> Bool {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return true }
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            .filter { $0.processIdentifier != currentPID }
+        guard !others.isEmpty else { return true }
+
+        let currentBuild = Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0
+        let newerOther = others.first { application in
+            guard let url = application.bundleURL,
+                  let bundle = Bundle(url: url),
+                  let value = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String else { return false }
+            return (Int(value) ?? 0) > currentBuild
+        }
+        if let newerOther {
+            newerOther.activate()
+            NSApp.terminate(nil)
+            return false
+        }
+        others.forEach { $0.terminate() }
+        return true
     }
 }
 
-final class CompactStatusItemView: NSView {
-    var onClick: (() -> Void)?
+struct ExecutableIdentity: Equatable {
+    let inode: UInt64
+    let size: UInt64
+    let modifiedAt: TimeInterval
 
-    private let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-    private let horizontalPadding: CGFloat = 5
-    private var title = ""
-    private var color = NSColor.labelColor
-    private var backgroundColor = NSColor.clear
-
-    func update(title: String, color: NSColor, backgroundColor: NSColor, tooltip: String) {
-        self.title = title
-        self.color = color
-        self.backgroundColor = backgroundColor
-        self.toolTip = tooltip
-
-        let width = ceil(attributedTitle.size().width + horizontalPadding * 2)
-        frame = NSRect(x: 0, y: 0, width: width, height: NSStatusBar.system.thickness)
-        needsDisplay = true
+    static func current(
+        bundle: Bundle = .main,
+        fileManager: FileManager = .default
+    ) -> ExecutableIdentity? {
+        guard let executableURL = bundle.executableURL else { return nil }
+        return current(executableURL: executableURL, fileManager: fileManager)
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-
-        let size = attributedTitle.size()
-        let tagRect = NSRect(
-            x: 0,
-            y: floor((bounds.height - 17) / 2),
-            width: bounds.width,
-            height: 17
-        )
-        backgroundColor.setFill()
-        NSBezierPath(roundedRect: tagRect, xRadius: 5, yRadius: 5).fill()
-
-        color.set()
-        let rect = NSRect(
-            x: horizontalPadding,
-            y: floor((bounds.height - size.height) / 2),
-            width: size.width,
-            height: size.height
-        )
-        attributedTitle.draw(in: rect)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        onClick?()
-    }
-
-    override func rightMouseDown(with event: NSEvent) {
-        onClick?()
-    }
-
-    private var attributedTitle: NSAttributedString {
-        NSAttributedString(
-            string: title,
-            attributes: [
-                .font: font,
-                .foregroundColor: color,
-                .kern: -0.2
-            ]
+    static func current(
+        executableURL: URL,
+        fileManager: FileManager = .default
+    ) -> ExecutableIdentity? {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: executableURL.path),
+              let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+              let size = (attributes[.size] as? NSNumber)?.uint64Value,
+              let date = attributes[.modificationDate] as? Date else {
+            return nil
+        }
+        return ExecutableIdentity(
+            inode: inode,
+            size: size,
+            modifiedAt: date.timeIntervalSince1970
         )
     }
 }
@@ -262,12 +313,17 @@ struct StatusPanelView: View {
         HStack(alignment: .center, spacing: 8) {
             Text("\(store.snapshot.sourceName) · \(store.snapshot.lastUpdatedText)")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(store.snapshot.isUnavailable ? .red : .secondary)
+                .foregroundStyle(
+                    store.snapshot.isUnavailable
+                        ? Color.red
+                        : (store.snapshot.freshness == .stale ? Color.orange : Color.secondary)
+                )
                 .lineLimit(1)
+                .help(store.snapshot.diagnosticText)
 
             Spacer()
 
-            RefreshIconButton {
+            RefreshIconButton(isRefreshing: store.isRefreshing) {
                 store.refresh()
             }
 
@@ -282,7 +338,7 @@ struct StatusPanelView: View {
                     Text(store.snapshot.percentText)
                         .font(.system(size: 44, weight: .bold, design: .rounded))
                         .monospacedDigit()
-                    Text("5 小时剩余")
+                    Text(store.snapshot.primaryQuotaLabel)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
@@ -301,14 +357,16 @@ struct StatusPanelView: View {
 
             QuotaProgressBar(percent: store.snapshot.displayRemainingPercent, tint: store.snapshot.tint)
 
-            Divider()
-                .padding(.vertical, 1)
+            if store.snapshot.hasSeparateWeeklyQuota {
+                Divider()
+                    .padding(.vertical, 1)
 
-            SecondaryQuotaRow(
-                title: "周额度",
-                percentText: store.snapshot.weeklyPercentText,
-                trailing: store.snapshot.weeklyResetDateText
-            )
+                SecondaryQuotaRow(
+                    title: "周额度",
+                    percentText: store.snapshot.weeklyPercentText,
+                    trailing: store.snapshot.weeklyResetDateText
+                )
+            }
         }
         .padding(14)
         .notificationInsetSurface(cornerRadius: 12)
@@ -471,6 +529,7 @@ private extension View {
 }
 
 struct RefreshIconButton: View {
+    let isRefreshing: Bool
     let action: () -> Void
     @State private var isPressed = false
     @State private var isHovered = false
@@ -479,9 +538,17 @@ struct RefreshIconButton: View {
         Button {
             action()
         } label: {
-            PanelIconFrame(systemImage: "arrow.clockwise", isPressed: isPressed, isHovered: isHovered)
+            if isRefreshing {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 24, height: 24)
+                    .glassIconSurface(isPressed: false, isHovered: isHovered)
+            } else {
+                PanelIconFrame(systemImage: "arrow.clockwise", isPressed: isPressed, isHovered: isHovered)
+            }
         }
         .buttonStyle(.plain)
+        .disabled(isRefreshing)
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.08)) {
                 isHovered = hovering
@@ -502,7 +569,7 @@ struct RefreshIconButton: View {
                     }
                 }
         )
-        .help("刷新")
+        .help(isRefreshing ? "正在通过 ChatGPT 查询额度" : "刷新额度")
     }
 }
 
@@ -567,6 +634,46 @@ struct ActionsPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if store.snapshot.requiresCodexLogin {
+                Button {
+                    store.openChatGPTForLogin()
+                } label: {
+                    ActionMenuRow(
+                        systemImage: "person.crop.circle.badge.exclamationmark",
+                        title: "打开 ChatGPT 登录",
+                        trailing: nil
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Divider()
+            }
+
+            Button {
+                store.toggleNotifications()
+            } label: {
+                ActionMenuRow(
+                    systemImage: store.notificationStatusIcon,
+                    title: "额度通知",
+                    trailing: store.notificationStatusText
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(store.notificationPermissionState == .requesting)
+
+            Button {
+                store.toggleLaunchAtLogin()
+            } label: {
+                ActionMenuRow(
+                    systemImage: store.launchAtLoginEnabled ? "checkmark.circle.fill" : "circle",
+                    title: "登录时启动",
+                    trailing: store.launchAtLoginEnabled ? "已开启" : "已关闭"
+                )
+            }
+            .buttonStyle(.plain)
+
+            Divider()
+
             Button {
                 store.toggleVoiceBroadcast()
             } label: {
@@ -596,6 +703,31 @@ struct ActionsPopover: View {
             Divider()
 
             Button {
+                store.copyDiagnostics()
+            } label: {
+                ActionMenuRow(systemImage: "doc.on.clipboard", title: "复制诊断信息", trailing: nil)
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Codex 额度 \(appVersionText)")
+                Text(Bundle.main.bundleURL.path)
+                    .lineLimit(2)
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+
+            if let message = store.settingsMessage {
+                Text(message)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+            }
+
+            Divider()
+
+            Button {
                 NSApplication.shared.terminate(nil)
             } label: {
                 ActionMenuRow(systemImage: "power", title: "退出应用", trailing: nil)
@@ -604,6 +736,12 @@ struct ActionsPopover: View {
         }
         .padding(10)
         .background(PanelGlassBackground())
+    }
+
+    private var appVersionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        return "\(version) (\(build))"
     }
 }
 
@@ -707,31 +845,107 @@ struct SecondaryQuotaRow: View {
     }
 }
 
+enum NotificationPermissionState: Equatable {
+    case checking
+    case notDetermined
+    case requesting
+    case denied
+    case authorized
+
+    func statusText(localEnabled: Bool) -> String {
+        switch self {
+        case .checking:
+            "检查中"
+        case .requesting:
+            "申请中"
+        case .denied:
+            "需授权"
+        case .authorized:
+            localEnabled ? "已开启" : "已关闭"
+        case .notDetermined:
+            "已关闭"
+        }
+    }
+
+    func icon(localEnabled: Bool) -> String {
+        switch self {
+        case .checking, .requesting:
+            "bell.badge"
+        case .denied:
+            "bell.badge.fill"
+        case .authorized where localEnabled:
+            "bell.fill"
+        case .authorized, .notDetermined:
+            "bell.slash"
+        }
+    }
+}
+
 @MainActor
 final class QuotaStore: ObservableObject {
     @Published var snapshot: QuotaSnapshot
+    @Published private(set) var isRefreshing = false
     @Published var voiceBroadcastEnabled = false
     @Published var voiceBroadcastIntervalMinutes: Int
+    @Published var notificationsEnabled: Bool
+    @Published private(set) var notificationPermissionState: NotificationPermissionState = .checking
+    @Published var launchAtLoginEnabled: Bool
+    @Published var settingsMessage: String?
 
     private var timer: Timer?
     private var voiceTimer: Timer?
-    private var isRefreshing = false
+    private var transientRefreshWorkItem: DispatchWorkItem?
     private var speakAfterRefresh = false
     private let refreshQueue = DispatchQueue(label: "com.codexmeter.refresh", qos: .utility)
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var notifiedLevels = Set<Int>()
+    private let recoveryDetector = QuotaRecoveryDetector()
+    private var recoveryObservations: [Int: QuotaObservation]
+    private var pendingRecoveries: [Int: QuotaRecoveryEvent] = [:]
+    private var notifiedRecoveryFingerprints: [String]
+    private var recoveryConfirmationScheduled = false
     private let provider: QuotaProvider
+    private var logMonitor: SessionLogMonitor?
+    private var updateHandlerInstalled = false
 
-    init(provider: QuotaProvider = CompositeQuotaProvider()) {
+    init(provider: QuotaProvider = HybridQuotaProvider()) {
         self.provider = provider
         self.snapshot = QuotaSnapshot.unavailable()
         let savedInterval = UserDefaults.standard.integer(forKey: CacheKey.voiceBroadcastIntervalMinutes)
         self.voiceBroadcastIntervalMinutes = Self.allowedVoiceBroadcastIntervals.contains(savedInterval) ? savedInterval : 1
+        self.notificationsEnabled = UserDefaults.standard.bool(forKey: CacheKey.notificationsEnabled)
+        self.launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+        self.recoveryObservations = Dictionary(
+            uniqueKeysWithValues: (QuotaSnapshot.cached()?.quotaObservations ?? []).map {
+                ($0.windowMinutes, $0)
+            }
+        )
+        self.notifiedRecoveryFingerprints = UserDefaults.standard.stringArray(
+            forKey: CacheKey.notifiedRecoveryFingerprints
+        ) ?? []
     }
 
     func start() {
+        syncNotificationAuthorizationStatus()
+        if !updateHandlerInstalled {
+            updateHandlerInstalled = true
+            provider.setUpdateHandler { [weak self] liveSnapshot in
+                Task { @MainActor in
+                    self?.apply(liveSnapshot)
+                }
+            }
+        }
         refresh()
-        requestNotificationPermission()
+        if logMonitor == nil {
+            let roots = CodexSessionPaths.roots
+            let monitor = SessionLogMonitor(roots: roots) { [weak self] in
+                Task { @MainActor in
+                    self?.refresh()
+                }
+            }
+            logMonitor = monitor
+            monitor.start()
+        }
         guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -752,19 +966,40 @@ final class QuotaStore: ObservableObject {
                 guard let self else { return }
                 let shouldSpeak = self.speakAfterRefresh
                 self.speakAfterRefresh = false
-                if let liveSnapshot {
-                    self.snapshot = liveSnapshot
-                    liveSnapshot.cache()
-                } else {
-                    self.snapshot = .unavailable()
-                }
                 self.isRefreshing = false
-                self.evaluateNotifications()
+                self.apply(liveSnapshot)
                 if shouldSpeak, self.voiceBroadcastEnabled {
                     self.speak(self.snapshot)
                 }
             }
         }
+    }
+
+    private func apply(_ newSnapshot: QuotaSnapshot) {
+        evaluateQuotaRecovery(in: newSnapshot)
+        snapshot = newSnapshot
+        newSnapshot.cache()
+        evaluateNotifications()
+        updateTransientRefresh(for: newSnapshot)
+    }
+
+    private func updateTransientRefresh(for snapshot: QuotaSnapshot) {
+        let needsFastRetry = snapshot.sourceName.contains("实时查询异常")
+            || snapshot.sourceName == "实时接口暂时不可用"
+        guard needsFastRetry else {
+            transientRefreshWorkItem?.cancel()
+            transientRefreshWorkItem = nil
+            return
+        }
+        guard transientRefreshWorkItem == nil else { return }
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.transientRefreshWorkItem = nil
+            self.refresh()
+        }
+        transientRefreshWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: item)
     }
 
     func toggleVoiceBroadcast() {
@@ -807,6 +1042,167 @@ final class QuotaStore: ObservableObject {
         }
     }
 
+    func toggleNotifications() {
+        if notificationsEnabled {
+            setNotificationsEnabled(false)
+            UserDefaults.standard.set(false, forKey: CacheKey.notificationEnablePending)
+            settingsMessage = "额度通知已关闭"
+            return
+        }
+
+        notificationPermissionState = .requesting
+        settingsMessage = "正在检查通知权限…"
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let settings = await center.notificationSettings()
+
+            switch settings.authorizationStatus {
+            case .notDetermined:
+                UserDefaults.standard.set(true, forKey: CacheKey.notificationEnablePending)
+                do {
+                    let granted = try await center.requestAuthorization(options: [.alert, .sound])
+                    if granted {
+                        setNotificationsEnabled(true)
+                        UserDefaults.standard.set(false, forKey: CacheKey.notificationEnablePending)
+                        notificationPermissionState = .authorized
+                        settingsMessage = "额度通知已开启"
+                    } else {
+                        setNotificationsEnabled(false)
+                        notificationPermissionState = .denied
+                        settingsMessage = "通知权限未授予；再次点击可打开系统设置"
+                    }
+                } catch {
+                    setNotificationsEnabled(false)
+                    notificationPermissionState = .notDetermined
+                    settingsMessage = "通知授权失败：\(error.localizedDescription)"
+                }
+            case .denied:
+                setNotificationsEnabled(false)
+                UserDefaults.standard.set(true, forKey: CacheKey.notificationEnablePending)
+                notificationPermissionState = .denied
+                settingsMessage = "请在系统设置中允许 Codex 额度通知"
+                openNotificationSettings()
+            case .authorized, .provisional, .ephemeral:
+                setNotificationsEnabled(true)
+                UserDefaults.standard.set(false, forKey: CacheKey.notificationEnablePending)
+                notificationPermissionState = .authorized
+                settingsMessage = "额度通知已开启"
+            @unknown default:
+                setNotificationsEnabled(false)
+                notificationPermissionState = .notDetermined
+                settingsMessage = "无法识别当前通知权限状态"
+            }
+        }
+    }
+
+    func syncNotificationAuthorizationStatus() {
+        Task {
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            let pendingEnable = UserDefaults.standard.bool(forKey: CacheKey.notificationEnablePending)
+
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                notificationPermissionState = .authorized
+                if pendingEnable {
+                    setNotificationsEnabled(true)
+                    UserDefaults.standard.set(false, forKey: CacheKey.notificationEnablePending)
+                    settingsMessage = "额度通知已开启"
+                }
+            case .denied:
+                notificationPermissionState = .denied
+                setNotificationsEnabled(false)
+            case .notDetermined:
+                notificationPermissionState = .notDetermined
+                setNotificationsEnabled(false)
+            @unknown default:
+                notificationPermissionState = .notDetermined
+                setNotificationsEnabled(false)
+            }
+        }
+    }
+
+    var notificationStatusText: String {
+        notificationPermissionState.statusText(localEnabled: notificationsEnabled)
+    }
+
+    var notificationStatusIcon: String {
+        notificationPermissionState.icon(localEnabled: notificationsEnabled)
+    }
+
+    private func setNotificationsEnabled(_ enabled: Bool) {
+        notificationsEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: CacheKey.notificationsEnabled)
+    }
+
+    private func openNotificationSettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.notifications"
+        ]
+        let opened = candidates
+            .compactMap(URL.init(string:))
+            .contains { NSWorkspace.shared.open($0) }
+        if !opened {
+            settingsMessage = "无法打开系统设置，请手动前往“通知”并允许 Codex 额度"
+        }
+    }
+
+    func toggleLaunchAtLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+            launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+            settingsMessage = launchAtLoginEnabled ? "已开启登录时启动" : "已关闭登录时启动"
+        } catch {
+            launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+            settingsMessage = "登录启动设置失败：\(error.localizedDescription)"
+        }
+    }
+
+    func openChatGPTForLogin() {
+        let candidates = [
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.chat"),
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.chatgpt"),
+            URL(fileURLWithPath: "/Applications/ChatGPT.app"),
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications/ChatGPT.app")
+        ].compactMap { $0 }
+        guard let appURL = candidates.first(where: {
+            FileManager.default.fileExists(atPath: $0.path)
+        }) else {
+            settingsMessage = "未找到 ChatGPT.app，请先安装新版 ChatGPT 桌面应用"
+            return
+        }
+
+        if NSWorkspace.shared.open(appURL) {
+            settingsMessage = "请在 ChatGPT 中完成登录，然后返回刷新"
+        } else {
+            settingsMessage = "无法打开 ChatGPT，请手动打开并登录"
+        }
+    }
+
+    func copyDiagnostics() {
+        let bundle = Bundle.main
+        let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
+        let text = """
+        Codex 额度 \(version) (\(build))
+        Path: \(bundle.bundleURL.path)
+        Status: \(snapshot.diagnosticText)
+        Source: \(snapshot.sourceName)
+        ChatGPT CLI: \(ChatGPTCLIExecutableLocator.diagnosticExecutablePath())
+        Login required: \(snapshot.requiresCodexLogin ? "yes" : "no")
+        Window: \(snapshot.primaryWindowMinutes) minutes
+        Remaining: \(snapshot.isUnavailable ? "unknown" : "\(snapshot.remainingPercent)%")
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        settingsMessage = "诊断信息已复制（不含会话内容）"
+    }
+
     private func requestVoiceBroadcast() {
         speakAfterRefresh = true
         refresh()
@@ -814,7 +1210,7 @@ final class QuotaStore: ObservableObject {
 
     private func speak(_ snapshot: QuotaSnapshot) {
         guard !snapshot.isUnavailable else { return }
-        let text = "Codex 五小时额度剩余 \(snapshot.remainingPercent)%，距离额度恢复 \(snapshot.resetText)。"
+        let text = "Codex \(snapshot.primaryQuotaSpeechLabel)额度剩余 \(snapshot.remainingPercent)%，距离额度恢复 \(snapshot.resetText)。"
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
         utterance.rate = 0.48
@@ -823,13 +1219,123 @@ final class QuotaStore: ObservableObject {
     }
 
     private func evaluateNotifications() {
-        guard !snapshot.isUnavailable else { return }
+        guard notificationsEnabled, !snapshot.isUnavailable, snapshot.freshness != .stale else { return }
         let remaining = snapshot.remainingPercent
 
         if remaining <= 10 {
-            notifyOnce(level: 10, title: "Codex 额度接近耗尽", body: "当前 5h 剩余 \(remaining)%，建议放慢高消耗任务。")
+            notifyOnce(level: 10, title: "Codex 额度接近耗尽", body: "当前\(snapshot.primaryQuotaShortLabel)剩余 \(remaining)%，建议放慢高消耗任务。")
         } else if remaining <= 20 {
-            notifyOnce(level: 20, title: "Codex 额度偏低", body: "当前 5h 剩余 \(remaining)%，距离额度恢复 \(snapshot.resetText)。")
+            notifyOnce(level: 20, title: "Codex 额度偏低", body: "当前\(snapshot.primaryQuotaShortLabel)剩余 \(remaining)%，距离额度恢复 \(snapshot.resetText)。")
+        }
+    }
+
+    private func evaluateQuotaRecovery(in newSnapshot: QuotaSnapshot) {
+        guard !newSnapshot.isUnavailable,
+              newSnapshot.freshness != .stale,
+              newSnapshot.sourceName.hasPrefix("官方") else {
+            return
+        }
+
+        let observations = newSnapshot.quotaObservations
+        guard notificationsEnabled else {
+            pendingRecoveries.removeAll()
+            recoveryObservations = Dictionary(
+                uniqueKeysWithValues: observations.map { ($0.windowMinutes, $0) }
+            )
+            return
+        }
+
+        var detectedCandidate = false
+        for observation in observations {
+            let window = observation.windowMinutes
+
+            if let pending = pendingRecoveries[window],
+               observation.observedAt > pending.detectedAt {
+                pendingRecoveries.removeValue(forKey: window)
+                if recoveryDetector.confirms(pending, with: observation) {
+                    deliverRecoveryNotification(pending, confirmedBy: observation)
+                }
+            }
+
+            if pendingRecoveries[window] == nil,
+               let previous = recoveryObservations[window],
+               let event = recoveryDetector.detect(
+                   previous: previous,
+                   current: observation,
+                   now: observation.observedAt
+               ),
+               !notifiedRecoveryFingerprints.contains(event.fingerprint) {
+                pendingRecoveries[window] = event
+                detectedCandidate = true
+            }
+
+            recoveryObservations[window] = observation
+        }
+
+        if detectedCandidate {
+            scheduleRecoveryConfirmation()
+        }
+    }
+
+    private func scheduleRecoveryConfirmation() {
+        guard !recoveryConfirmationScheduled else { return }
+        recoveryConfirmationScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self else { return }
+            self.recoveryConfirmationScheduled = false
+            self.refresh()
+        }
+    }
+
+    private func deliverRecoveryNotification(
+        _ event: QuotaRecoveryEvent,
+        confirmedBy observation: QuotaObservation
+    ) {
+        guard !notifiedRecoveryFingerprints.contains(event.fingerprint) else { return }
+        notifiedRecoveryFingerprints.insert(event.fingerprint, at: 0)
+        if notifiedRecoveryFingerprints.count > 50 {
+            notifiedRecoveryFingerprints.removeLast(notifiedRecoveryFingerprints.count - 50)
+        }
+        UserDefaults.standard.set(
+            notifiedRecoveryFingerprints,
+            forKey: CacheKey.notifiedRecoveryFingerprints
+        )
+
+        notifiedLevels.removeAll()
+        let label = quotaWindowNotificationLabel(minutes: event.windowMinutes)
+        let title: String
+        let body: String
+        switch event.kind {
+        case .scheduledReset:
+            title = "Codex \(label)额度已重置"
+            body = "当前剩余 \(observation.remainingPercent)%。"
+        case .earlyReset:
+            title = "Codex \(label)额度提前恢复"
+            body = "剩余额度从 \(event.previousRemainingPercent)% 提升至 \(observation.remainingPercent)%，可能是服务端补偿或统一重置。"
+        case .significantRecovery:
+            title = "Codex \(label)额度大幅回升"
+            body = "剩余额度从 \(event.previousRemainingPercent)% 提升至 \(observation.remainingPercent)%，可能是服务端补偿或统一重置。"
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "codex-meter-recovery-\(event.fingerprint)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private func quotaWindowNotificationLabel(minutes: Int) -> String {
+        switch minutes {
+        case 300: "5 小时"
+        case 10_080: "周"
+        case let value where value % 1_440 == 0: "\(value / 1_440) 天"
+        case let value where value % 60 == 0: "\(value / 60) 小时"
+        default: "\(minutes) 分钟"
         }
     }
 
@@ -850,372 +1356,354 @@ final class QuotaStore: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
 
-    private func requestNotificationPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-    }
-
     private static let allowedVoiceBroadcastIntervals = [1, 5, 10]
+
 }
 
 protocol QuotaProvider: Sendable {
-    func currentSnapshot() -> QuotaSnapshot?
+    func currentSnapshot() -> QuotaSnapshot
+    func setUpdateHandler(_ handler: (@Sendable (QuotaSnapshot) -> Void)?)
 }
 
-struct CompositeQuotaProvider: QuotaProvider {
-    private let logProvider = CodexLogQuotaProvider()
-    private let realProvider = CodexSessionQuotaProvider()
-
-    func currentSnapshot() -> QuotaSnapshot? {
-        logProvider.currentSnapshot() ?? realProvider.currentSnapshot()
-    }
+extension QuotaProvider {
+    func setUpdateHandler(_ handler: (@Sendable (QuotaSnapshot) -> Void)?) {}
 }
 
-struct CodexLogQuotaProvider {
-    func currentSnapshot() -> QuotaSnapshot? {
-        guard let record = newestHeaderRateLimitRecord() else {
-            return nil
-        }
+struct CodexSessionQuotaProvider: QuotaProvider {
+    private let reader = SessionQuotaReader()
 
-        let now = Date()
-        let primaryUsed = Self.percent(record.primary.usedPercent)
-        let weeklyUsed = Self.percent(record.secondary.usedPercent)
-        return QuotaSnapshot(
-            remainingPercent: max(0, min(100, 100 - primaryUsed)),
-            weeklyRemainingPercent: max(0, min(100, 100 - weeklyUsed)),
-            resetDate: Date(timeIntervalSince1970: record.primary.resetsAt),
-            weeklyResetDate: Date(timeIntervalSince1970: record.secondary.resetsAt),
-            lastUpdated: now,
-            sourceName: "Codex 日志",
-            isUnavailable: false
+    func currentSnapshot() -> QuotaSnapshot {
+        QuotaSnapshot(
+            reading: reader.read(roots: CodexSessionPaths.roots),
+            sourceName: "Codex 会话"
         )
     }
+}
 
-    private func newestHeaderRateLimitRecord() -> RateLimitRecord? {
-        let databaseURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/logs_2.sqlite")
-        guard FileManager.default.fileExists(atPath: databaseURL.path) else {
-            return nil
+final class HybridQuotaProvider: @unchecked Sendable, QuotaProvider {
+    private let appServer: any AppServerQuotaClient
+    private let fallback: any QuotaProvider
+    private let requestTimeout: TimeInterval
+    private let retryDelays: [TimeInterval]
+    private let sleep: @Sendable (TimeInterval) -> Void
+
+    init(
+        appServer: any AppServerQuotaClient = CodexAppServerClient(),
+        fallback: any QuotaProvider = CodexSessionQuotaProvider(),
+        requestTimeout: TimeInterval = 20,
+        retryDelays: [TimeInterval] = [1.5],
+        sleep: @escaping @Sendable (TimeInterval) -> Void = {
+            Thread.sleep(forTimeInterval: $0)
         }
+    ) {
+        self.appServer = appServer
+        self.fallback = fallback
+        self.requestTimeout = requestTimeout
+        self.retryDelays = retryDelays
+        self.sleep = sleep
+    }
 
-        let query = """
-        select ts || char(9) || feedback_log_body from logs
-        where feedback_log_body like '%x-codex-primary-used-percent%'
-        order by ts desc, ts_nanos desc, id desc
-        limit 1;
-        """
-        guard let output = runSQLite(databasePath: databaseURL.path, query: query) else {
-            return nil
-        }
-
-        let parts = output.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
-        guard parts.count == 2,
-              let timestamp = TimeInterval(parts[0]),
-              let primaryUsed = Self.headerDouble("x-codex-primary-used-percent", in: String(parts[1])),
-              let weeklyUsed = Self.headerDouble("x-codex-secondary-used-percent", in: String(parts[1])),
-              let primaryResetAt = Self.headerDouble("x-codex-primary-reset-at", in: String(parts[1])),
-              let weeklyResetAt = Self.headerDouble("x-codex-secondary-reset-at", in: String(parts[1])),
-              let primaryWindowMinutes = Self.headerInt("x-codex-primary-window-minutes", in: String(parts[1])),
-              let weeklyWindowMinutes = Self.headerInt("x-codex-secondary-window-minutes", in: String(parts[1])) else {
-            return nil
-        }
-
-        let now = Date().timeIntervalSince1970
-        guard primaryResetAt > now, weeklyResetAt > now else {
-            return nil
-        }
-
-        return RateLimitRecord(
-            timestamp: Date(timeIntervalSince1970: timestamp),
-            fileModifiedAt: Date(timeIntervalSince1970: timestamp),
-            primary: RateLimitWindow(
-                usedPercent: primaryUsed,
-                resetsAt: primaryResetAt,
-                windowMinutes: primaryWindowMinutes
-            ),
-            secondary: RateLimitWindow(
-                usedPercent: weeklyUsed,
-                resetsAt: weeklyResetAt,
-                windowMinutes: weeklyWindowMinutes
+    func currentSnapshot() -> QuotaSnapshot {
+        let liveResult = readLiveRateLimits()
+        switch liveResult.result {
+        case let .success(reading):
+            var snapshot = QuotaSnapshot(
+                reading: reading,
+                sourceName: "官方实时接口"
             )
-        )
-    }
+            if liveResult.attempts > 1 {
+                snapshot.sourceNote = "实时查询重试后第 \(liveResult.attempts) 次成功"
+            }
+            return snapshot
+        case let .failure(error):
+            let requiresLogin: Bool
+            let executableMissing: Bool
+            let transientFailure: Bool
+            if let appServerError = error as? CodexAppServerError,
+               case .chatGPTLoginRequired = appServerError {
+                requiresLogin = true
+            } else {
+                requiresLogin = false
+            }
+            if let appServerError = error as? CodexAppServerError,
+               case .executableNotFound = appServerError {
+                executableMissing = true
+            } else {
+                executableMissing = false
+            }
+            transientFailure = (error as? CodexAppServerError)?.isTransient == true
 
-    private func runSQLite(databasePath: String, query: String) -> String? {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        process.arguments = ["-readonly", databasePath, query]
-        process.standardOutput = output
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-        } catch {
-            return nil
+            var snapshot = fallback.currentSnapshot()
+            snapshot.requiresCodexLogin = requiresLogin
+            if requiresLogin {
+                snapshot.sourceName = snapshot.isUnavailable ? "请先登录 ChatGPT" : "会话日志（需登录）"
+            } else if executableMissing {
+                snapshot.sourceName = snapshot.isUnavailable ? "未找到新版 ChatGPT" : "会话日志（未找到新版 ChatGPT）"
+            } else if transientFailure {
+                snapshot.sourceName = snapshot.isUnavailable ? "实时接口暂时不可用" : "会话日志（实时查询异常）"
+            } else {
+                snapshot.sourceName = snapshot.isUnavailable ? "额度未获取" : "会话日志（降级）"
+            }
+            snapshot.sourceNote = Self.safeMessage(for: error, attempts: liveResult.attempts)
+            if snapshot.isUnavailable, let cached = QuotaSnapshot.cached() {
+                snapshot = cached
+                snapshot.requiresCodexLogin = requiresLogin
+                if requiresLogin {
+                    snapshot.sourceName = "本机缓存（需登录）"
+                } else if transientFailure {
+                    snapshot.sourceName = "本机缓存（实时查询异常）"
+                } else {
+                    snapshot.sourceName = "本机缓存（降级）"
+                }
+                snapshot.sourceNote = Self.safeMessage(for: error, attempts: liveResult.attempts)
+            }
+            return snapshot
         }
-
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            return nil
-        }
-
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func headerDouble(_ name: String, in text: String) -> Double? {
-        guard let value = headerValue(name, in: text) else { return nil }
-        return Double(value)
-    }
-
-    private static func headerInt(_ name: String, in text: String) -> Int? {
-        guard let value = headerValue(name, in: text) else { return nil }
-        return Int(value)
-    }
-
-    private static func headerValue(_ name: String, in text: String) -> String? {
-        let marker = "\"\(name)\": \""
-        guard let markerRange = text.range(of: marker) else {
-            return nil
-        }
-        let valueStart = markerRange.upperBound
-        guard let valueEnd = text[valueStart...].firstIndex(of: "\"") else {
-            return nil
-        }
-        return String(text[valueStart..<valueEnd])
-    }
-
-    private static func percent(_ value: Double) -> Int {
-        Int(value.rounded())
-    }
-}
-
-struct CodexSessionQuotaProvider {
-    func currentSnapshot() -> QuotaSnapshot? {
-        guard let record = newestRateLimitRecord() else {
-            return nil
-        }
-
-        let now = Date()
-        let primaryUsed = Self.percent(record.primary.usedPercent)
-        let weeklyUsed = Self.percent(record.secondary.usedPercent)
-        let primaryRemaining = max(0, min(100, 100 - primaryUsed))
-        let weeklyRemaining = max(0, min(100, 100 - weeklyUsed))
-
-        return QuotaSnapshot(
-            remainingPercent: primaryRemaining,
-            weeklyRemainingPercent: weeklyRemaining,
-            resetDate: Date(timeIntervalSince1970: record.primary.resetsAt),
-            weeklyResetDate: Date(timeIntervalSince1970: record.secondary.resetsAt),
-            lastUpdated: now,
-            sourceName: "Codex 会话",
-            isUnavailable: false
-        )
-    }
-
-    private func newestRateLimitRecord() -> RateLimitRecord? {
-        let roots = [
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions"),
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/archived_sessions")
-        ]
-
-        let files = roots.flatMap { recentJSONLFiles(under: $0) }
-            .sorted { $0.modifiedAt > $1.modifiedAt }
-            .prefix(80)
-
-        var records: [RateLimitRecord] = []
-        for file in files {
-            records.append(contentsOf: rateLimitRecords(in: file.url, fileModifiedAt: file.modifiedAt))
-            if let newestRecord = records.map(\.sortDate).max(),
-               Date().timeIntervalSince(newestRecord) < 15 * 60,
-               file.modifiedAt < newestRecord.addingTimeInterval(-15 * 60) {
-                break
+    private func readLiveRateLimits() -> (result: Result<QuotaReading, Error>, attempts: Int) {
+        var attempts = 0
+        while true {
+            attempts += 1
+            do {
+                return (
+                    .success(try appServer.readRateLimits(timeout: requestTimeout)),
+                    attempts
+                )
+            } catch {
+                guard let appServerError = error as? CodexAppServerError,
+                      appServerError.isTransient,
+                      attempts <= retryDelays.count else {
+                    return (.failure(error), attempts)
+                }
+                let delay = retryDelays[attempts - 1]
+                if delay > 0 {
+                    sleep(delay)
+                }
             }
         }
-
-        return bestRateLimitRecord(from: records)
     }
 
-    private func recentJSONLFiles(under root: URL) -> [SessionFile] {
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
-        }
-
-        var files: [SessionFile] = []
-        for case let url as URL in enumerator {
-            guard url.pathExtension == "jsonl" else { continue }
-            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
-                  values.isRegularFile == true,
-                  let modifiedAt = values.contentModificationDate else {
-                continue
-            }
-            files.append(SessionFile(url: url, modifiedAt: modifiedAt))
-        }
-        return files
-    }
-
-    private func rateLimitRecords(in url: URL, fileModifiedAt: Date) -> [RateLimitRecord] {
-        guard let text = readTailText(from: url) else {
-            return []
-        }
-
-        var records: [RateLimitRecord] = []
-        for line in text.split(separator: "\n").reversed() {
-            guard line.contains("\"rate_limits\"") else { continue }
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let payload = object["payload"] as? [String: Any],
-                  let rateLimits = payload["rate_limits"] as? [String: Any],
-                  Self.isAggregateCodexLimit(rateLimits),
-                  let primary = parseWindow(rateLimits["primary"]),
-                  let secondary = parseWindow(rateLimits["secondary"]),
-                  primary.windowMinutes == 300,
-                  secondary.windowMinutes == 10_080 else {
-                continue
-            }
-
-            records.append(
-                RateLimitRecord(
-                    timestamp: parseDate(object["timestamp"] as? String),
-                    fileModifiedAt: fileModifiedAt,
-                    primary: primary,
-                    secondary: secondary
+    func setUpdateHandler(_ handler: (@Sendable (QuotaSnapshot) -> Void)?) {
+        appServer.setUpdateHandler { reading in
+            handler?(
+                QuotaSnapshot(
+                    reading: reading,
+                    sourceName: "官方实时推送"
                 )
             )
-            if records.count >= 40 {
-                break
+        }
+    }
+
+    private static func safeMessage(for error: Error, attempts: Int) -> String {
+        let description = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        if let appServerError = error as? CodexAppServerError,
+           case .chatGPTLoginRequired = appServerError {
+            return description
+        }
+        let attemptText = attempts > 1 ? "（已尝试 \(attempts) 次）" : ""
+        return "实时查询失败\(attemptText)，已使用本地数据：\(description)"
+    }
+}
+
+final class SessionLogMonitor: @unchecked Sendable {
+    private let roots: [URL]
+    private let onChange: @Sendable () -> Void
+    private let queue = DispatchQueue(label: "com.codexmeter.file-monitor", qos: .utility)
+    private var sources: [DispatchSourceFileSystemObject] = []
+    private var rebuildScheduled = false
+
+    init(roots: [URL], onChange: @escaping @Sendable () -> Void) {
+        self.roots = roots
+        self.onChange = onChange
+    }
+
+    func start() {
+        queue.async { [weak self] in
+            self?.rebuildSources()
+        }
+    }
+
+    deinit {
+        sources.forEach { $0.cancel() }
+    }
+
+    private func rebuildSources() {
+        sources.forEach { $0.cancel() }
+        sources.removeAll()
+
+        let paths = roots.filter { FileManager.default.fileExists(atPath: $0.path) }
+            + recentSessionFiles(limit: 12)
+        for url in paths {
+            let descriptor = open(url.path, O_EVTONLY)
+            guard descriptor >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: descriptor,
+                eventMask: [.write, .extend, .rename, .delete],
+                queue: queue
+            )
+            source.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.onChange()
+                self.scheduleRebuild()
+            }
+            source.setCancelHandler {
+                close(descriptor)
+            }
+            sources.append(source)
+            source.resume()
+        }
+    }
+
+    private func scheduleRebuild() {
+        guard !rebuildScheduled else { return }
+        rebuildScheduled = true
+        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            self.rebuildScheduled = false
+            self.rebuildSources()
+        }
+    }
+
+    private func recentSessionFiles(limit: Int) -> [URL] {
+        var files: [(url: URL, date: Date)] = []
+        for root in roots {
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                      values.isRegularFile == true,
+                      let date = values.contentModificationDate else { continue }
+                files.append((url, date))
             }
         }
-
-        return records
-    }
-
-    private func bestRateLimitRecord(from records: [RateLimitRecord]) -> RateLimitRecord? {
-        let now = Date().timeIntervalSince1970
-        let currentWindowRecords = records.filter { record in
-            record.primary.resetsAt > now && record.secondary.resetsAt > now
-        }
-
-        return currentWindowRecords.max { lhs, rhs in
-            lhs.sortDate < rhs.sortDate
-        }
-    }
-
-    private func readTailText(from url: URL, maxBytes: UInt64 = 4 * 1024 * 1024) -> String? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else {
-            return nil
-        }
-        defer {
-            try? handle.close()
-        }
-
-        let fileSize = (try? handle.seekToEnd()) ?? 0
-        let offset = fileSize > maxBytes ? fileSize - maxBytes : 0
-        try? handle.seek(toOffset: offset)
-
-        guard let data = try? handle.readToEnd() else {
-            return nil
-        }
-
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    private func parseWindow(_ value: Any?) -> RateLimitWindow? {
-        guard let dictionary = value as? [String: Any],
-              let usedPercent = Self.double(dictionary["used_percent"]),
-              let resetsAt = Self.double(dictionary["resets_at"]) else {
-            return nil
-        }
-        return RateLimitWindow(
-            usedPercent: usedPercent,
-            resetsAt: resetsAt,
-            windowMinutes: Self.int(dictionary["window_minutes"])
-        )
-    }
-
-    private func parseDate(_ value: String?) -> Date? {
-        guard let value else { return nil }
-        let fractionalFormatter = ISO8601DateFormatter()
-        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractionalFormatter.date(from: value) {
-            return date
-        }
-
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: value)
-    }
-
-    private static func percent(_ value: Double) -> Int {
-        Int(value.rounded())
-    }
-
-    private static func isAggregateCodexLimit(_ rateLimits: [String: Any]) -> Bool {
-        (rateLimits["limit_id"] as? String) == "codex"
-    }
-
-    private static func double(_ value: Any?) -> Double? {
-        if let double = value as? Double {
-            return double
-        }
-        if let int = value as? Int {
-            return Double(int)
-        }
-        if let string = value as? String {
-            return Double(string)
-        }
-        return nil
-    }
-
-    private static func int(_ value: Any?) -> Int? {
-        if let int = value as? Int {
-            return int
-        }
-        if let double = value as? Double {
-            return Int(double)
-        }
-        if let string = value as? String {
-            return Int(string)
-        }
-        return nil
+        return files.sorted { $0.date > $1.date }.prefix(limit).map(\.url)
     }
 }
 
-private struct SessionFile {
-    let url: URL
-    let modifiedAt: Date
-}
-
-private struct RateLimitRecord {
-    let timestamp: Date?
-    let fileModifiedAt: Date
-    let primary: RateLimitWindow
-    let secondary: RateLimitWindow
-
-    var sortDate: Date {
-        timestamp ?? fileModifiedAt
-    }
-}
-
-private struct RateLimitWindow {
-    let usedPercent: Double
-    let resetsAt: Double
-    let windowMinutes: Int?
-}
-
-struct QuotaSnapshot {
+struct QuotaSnapshot: Sendable {
     var remainingPercent: Int
     var weeklyRemainingPercent: Int
     var resetDate: Date
     var weeklyResetDate: Date
-    var lastUpdated: Date
+    var dataTimestamp: Date?
+    var checkedAt: Date
+    var primaryWindowMinutes: Int
+    var weeklyWindowMinutes: Int
+    var diagnostic: QuotaDiagnostic
     var sourceName: String
+    var sourceNote: String?
+    var requiresCodexLogin: Bool
     var isUnavailable: Bool
+
+    init(reading: QuotaReading, sourceName: String) {
+        let primary = reading.window(minutes: 300)
+            ?? reading.window(minutes: 10_080)
+            ?? reading.windows.min { $0.windowMinutes < $1.windowMinutes }
+        let weekly = reading.window(minutes: 10_080)
+            ?? reading.windows.max { $0.windowMinutes < $1.windowMinutes }
+
+        guard let primary else {
+            self = .unavailable(diagnostic: reading.diagnostic, checkedAt: reading.checkedAt, dataTimestamp: reading.dataTimestamp)
+            return
+        }
+        let effectiveWeekly = weekly ?? primary
+        remainingPercent = Self.remaining(from: primary.usedPercent)
+        weeklyRemainingPercent = Self.remaining(from: effectiveWeekly.usedPercent)
+        resetDate = primary.resetsAt
+        weeklyResetDate = effectiveWeekly.resetsAt
+        dataTimestamp = reading.dataTimestamp
+        checkedAt = reading.checkedAt
+        primaryWindowMinutes = primary.windowMinutes
+        weeklyWindowMinutes = effectiveWeekly.windowMinutes
+        diagnostic = reading.diagnostic
+        self.sourceName = sourceName
+        sourceNote = nil
+        requiresCodexLogin = false
+        isUnavailable = false
+    }
+
+    private init(
+        remainingPercent: Int,
+        weeklyRemainingPercent: Int,
+        resetDate: Date,
+        weeklyResetDate: Date,
+        dataTimestamp: Date?,
+        checkedAt: Date,
+        primaryWindowMinutes: Int,
+        weeklyWindowMinutes: Int,
+        diagnostic: QuotaDiagnostic,
+        sourceName: String,
+        sourceNote: String?,
+        requiresCodexLogin: Bool = false,
+        isUnavailable: Bool
+    ) {
+        self.remainingPercent = remainingPercent
+        self.weeklyRemainingPercent = weeklyRemainingPercent
+        self.resetDate = resetDate
+        self.weeklyResetDate = weeklyResetDate
+        self.dataTimestamp = dataTimestamp
+        self.checkedAt = checkedAt
+        self.primaryWindowMinutes = primaryWindowMinutes
+        self.weeklyWindowMinutes = weeklyWindowMinutes
+        self.diagnostic = diagnostic
+        self.sourceName = sourceName
+        self.sourceNote = sourceNote
+        self.requiresCodexLogin = requiresCodexLogin
+        self.isUnavailable = isUnavailable
+    }
+
+    var hasSeparateWeeklyQuota: Bool {
+        guard !isUnavailable else { return true }
+        return primaryWindowMinutes != weeklyWindowMinutes
+    }
+
+    var primaryQuotaLabel: String {
+        "\(windowLabel(minutes: primaryWindowMinutes))额度剩余"
+    }
+
+    var primaryQuotaShortLabel: String {
+        primaryWindowMinutes == 300 ? "5h " : "\(windowLabel(minutes: primaryWindowMinutes))"
+    }
+
+    var primaryQuotaSpeechLabel: String {
+        primaryWindowMinutes == 300 ? "五小时" : windowLabel(minutes: primaryWindowMinutes)
+    }
+
+    var freshness: QuotaFreshness? {
+        dataTimestamp.map { QuotaFreshness.evaluate(dataTimestamp: $0, now: checkedAt) }
+    }
+
+    var freshnessLabel: String {
+        switch freshness {
+        case .current: "实时"
+        case .delayed: "数据延迟"
+        case .stale: "数据已过期"
+        case nil: isUnavailable ? diagnostic.userMessage : "缺少数据时间"
+        }
+    }
+
+    var menuBarTitle: String {
+        guard !isUnavailable else { return "— | 无数据" }
+        let prefix = freshness == .stale ? "! " : ""
+        return "\(prefix)\(percentText) | \(shortResetText)"
+    }
+
+    var diagnosticText: String {
+        if isUnavailable {
+            return sourceNote.map { "\(diagnostic.userMessage) · \($0)" } ?? diagnostic.userMessage
+        }
+        guard let dataTimestamp else {
+            return sourceNote ?? "额度可用，但缺少数据时间"
+        }
+        let dataText = dataTimestamp.formatted(date: .abbreviated, time: .shortened)
+        let checkedText = checkedAt.formatted(date: .omitted, time: .shortened)
+        let base = "数据 \(dataText) · 检查 \(checkedText) · \(freshnessLabel)"
+        return sourceNote.map { "\(base) · \($0)" } ?? base
+    }
 
     var percentText: String {
         isUnavailable ? "—" : "\(remainingPercent)%"
@@ -1237,6 +1725,30 @@ struct QuotaSnapshot {
         100 - weeklyRemainingPercent
     }
 
+    var quotaObservations: [QuotaObservation] {
+        guard !isUnavailable else { return [] }
+        let observedAt = dataTimestamp ?? checkedAt
+        var observations = [
+            QuotaObservation(
+                windowMinutes: primaryWindowMinutes,
+                remainingPercent: remainingPercent,
+                resetsAt: resetDate,
+                observedAt: observedAt
+            )
+        ]
+        if weeklyWindowMinutes != primaryWindowMinutes {
+            observations.append(
+                QuotaObservation(
+                    windowMinutes: weeklyWindowMinutes,
+                    remainingPercent: weeklyRemainingPercent,
+                    resetsAt: weeklyResetDate,
+                    observedAt: observedAt
+                )
+            )
+        }
+        return observations
+    }
+
     static func cached() -> QuotaSnapshot? {
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: CacheKey.remainingPercent) != nil else {
@@ -1248,8 +1760,15 @@ struct QuotaSnapshot {
             weeklyRemainingPercent: defaults.integer(forKey: CacheKey.weeklyRemainingPercent),
             resetDate: Date(timeIntervalSince1970: defaults.double(forKey: CacheKey.resetDate)),
             weeklyResetDate: Date(timeIntervalSince1970: defaults.double(forKey: CacheKey.weeklyResetDate)),
-            lastUpdated: Date(timeIntervalSince1970: defaults.double(forKey: CacheKey.lastUpdated)),
+            dataTimestamp: defaults.object(forKey: CacheKey.dataTimestamp).map { _ in
+                Date(timeIntervalSince1970: defaults.double(forKey: CacheKey.dataTimestamp))
+            },
+            checkedAt: Date(timeIntervalSince1970: defaults.double(forKey: CacheKey.checkedAt)),
+            primaryWindowMinutes: defaults.object(forKey: CacheKey.primaryWindowMinutes) == nil ? 300 : defaults.integer(forKey: CacheKey.primaryWindowMinutes),
+            weeklyWindowMinutes: defaults.object(forKey: CacheKey.weeklyWindowMinutes) == nil ? 10_080 : defaults.integer(forKey: CacheKey.weeklyWindowMinutes),
+            diagnostic: .ready,
             sourceName: "本机缓存",
+            sourceNote: nil,
             isUnavailable: false
         )
     }
@@ -1262,7 +1781,12 @@ struct QuotaSnapshot {
         defaults.set(weeklyRemainingPercent, forKey: CacheKey.weeklyRemainingPercent)
         defaults.set(resetDate.timeIntervalSince1970, forKey: CacheKey.resetDate)
         defaults.set(weeklyResetDate.timeIntervalSince1970, forKey: CacheKey.weeklyResetDate)
-        defaults.set(lastUpdated.timeIntervalSince1970, forKey: CacheKey.lastUpdated)
+        if let dataTimestamp {
+            defaults.set(dataTimestamp.timeIntervalSince1970, forKey: CacheKey.dataTimestamp)
+        }
+        defaults.set(checkedAt.timeIntervalSince1970, forKey: CacheKey.checkedAt)
+        defaults.set(primaryWindowMinutes, forKey: CacheKey.primaryWindowMinutes)
+        defaults.set(weeklyWindowMinutes, forKey: CacheKey.weeklyWindowMinutes)
     }
 
     var tint: Color {
@@ -1333,8 +1857,7 @@ struct QuotaSnapshot {
     }
 
     var lastUpdatedText: String {
-        guard !isUnavailable else { return "未同步" }
-        return "更新于 \(lastUpdated.formatted(date: .omitted, time: .shortened))"
+        diagnosticText
     }
 
     var weeklyResetDateText: String {
@@ -1376,17 +1899,39 @@ struct QuotaSnapshot {
         return "\(minutes)m"
     }
 
-    static func unavailable() -> QuotaSnapshot {
-        let now = Date()
+    static func unavailable(
+        diagnostic: QuotaDiagnostic = .noQuotaEvents,
+        checkedAt: Date = Date(),
+        dataTimestamp: Date? = nil
+    ) -> QuotaSnapshot {
         return QuotaSnapshot(
             remainingPercent: 0,
             weeklyRemainingPercent: 0,
-            resetDate: now,
-            weeklyResetDate: now,
-            lastUpdated: now,
+            resetDate: checkedAt,
+            weeklyResetDate: checkedAt,
+            dataTimestamp: dataTimestamp,
+            checkedAt: checkedAt,
+            primaryWindowMinutes: 300,
+            weeklyWindowMinutes: 10_080,
+            diagnostic: diagnostic,
             sourceName: "额度未获取",
+            sourceNote: nil,
             isUnavailable: true
         )
+    }
+
+    private static func remaining(from usedPercent: Double) -> Int {
+        max(0, min(100, 100 - Int(usedPercent.rounded())))
+    }
+
+    private func windowLabel(minutes: Int) -> String {
+        switch minutes {
+        case 300: "5 小时"
+        case 10_080: "周"
+        case let value where value % 1_440 == 0: "\(value / 1_440) 天"
+        case let value where value % 60 == 0: "\(value / 60) 小时"
+        default: "\(minutes) 分钟"
+        }
     }
 
 }
@@ -1396,6 +1941,12 @@ private enum CacheKey {
     static let weeklyRemainingPercent = "quota.weeklyRemainingPercent"
     static let resetDate = "quota.resetDate"
     static let weeklyResetDate = "quota.weeklyResetDate"
-    static let lastUpdated = "quota.lastUpdated"
+    static let dataTimestamp = "quota.dataTimestamp"
+    static let checkedAt = "quota.checkedAt"
+    static let primaryWindowMinutes = "quota.primaryWindowMinutes"
+    static let weeklyWindowMinutes = "quota.weeklyWindowMinutes"
     static let voiceBroadcastIntervalMinutes = "voiceBroadcast.intervalMinutes"
+    static let notificationsEnabled = "notifications.enabled"
+    static let notificationEnablePending = "notifications.enablePending"
+    static let notifiedRecoveryFingerprints = "notifications.recoveryFingerprints"
 }

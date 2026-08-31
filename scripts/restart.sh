@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_PATH="$ROOT_DIR/build/Codex Meter.app"
+APP_PATH="$ROOT_DIR/build/Codex 额度.app"
 
 if [ ! -d "$APP_PATH" ]; then
   "$ROOT_DIR/scripts/build-app.sh" >/dev/null
