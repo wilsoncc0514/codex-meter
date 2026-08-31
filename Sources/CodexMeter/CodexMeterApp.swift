@@ -3,6 +3,7 @@ import AVFoundation
 import Combine
 import CodexMeterCore
 import Darwin
+import QuartzCore
 import ServiceManagement
 import SwiftUI
 @preconcurrency import UserNotifications
@@ -28,6 +29,11 @@ private enum PanelMetrics {
     static let screenPadding: CGFloat = 8
 }
 
+private enum StatusBarRotationMetrics {
+    static let animationDuration: TimeInterval = 0.28
+    static let weeklyDisplayDuration: TimeInterval = 2
+}
+
 private enum CodexSessionPaths {
     static let roots = [
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions"),
@@ -43,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelWindow: NSPanel?
     private var outsideClickMonitor: Any?
     private var snapshotCancellable: AnyCancellable?
+    private var refreshSequenceCancellable: AnyCancellable?
+    private var statusRotationWorkItem: DispatchWorkItem?
     private var installationMonitor: Timer?
     private var launchedExecutableIdentity: ExecutableIdentity?
 
@@ -59,11 +67,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         snapshotCancellable = quotaStore.$snapshot.sink { [weak self] snapshot in
             self?.updateStatusItem(with: snapshot)
         }
+        refreshSequenceCancellable = quotaStore.$completedRefreshSequence
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.showWeeklyQuotaBriefly(for: self.quotaStore.snapshot)
+            }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         installationMonitor?.invalidate()
+        statusRotationWorkItem?.cancel()
         stopOutsideClickMonitor()
     }
 
@@ -158,10 +173,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusItem(with snapshot: QuotaSnapshot) {
-        let title = snapshot.menuBarTitle
+        statusRotationWorkItem?.cancel()
+        statusRotationWorkItem = nil
         let tooltip = snapshot.isUnavailable
             ? snapshot.diagnostic.userMessage
             : "\(snapshot.primaryQuotaShortLabel)额度剩余 \(snapshot.remainingPercent)% · \(snapshot.freshnessLabel) · \(snapshot.resetText)恢复"
+        renderStatusItem(title: snapshot.menuBarTitle, tooltip: tooltip, snapshot: snapshot)
+    }
+
+    private func showWeeklyQuotaBriefly(for snapshot: QuotaSnapshot) {
+        guard let weeklyTitle = snapshot.weeklyMenuBarTitle else { return }
+        statusRotationWorkItem?.cancel()
+        renderStatusItem(
+            title: weeklyTitle,
+            tooltip: "周额度剩余 \(snapshot.weeklyRemainingPercent)% · \(snapshot.weeklyResetDateText)",
+            snapshot: snapshot,
+            transitionFrom: .fromBottom
+        )
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.statusRotationWorkItem = nil
+            let latest = self.quotaStore.snapshot
+            let tooltip = latest.isUnavailable
+                ? latest.diagnostic.userMessage
+                : "\(latest.primaryQuotaShortLabel)额度剩余 \(latest.remainingPercent)% · \(latest.freshnessLabel) · \(latest.resetText)恢复"
+            self.renderStatusItem(
+                title: latest.menuBarTitle,
+                tooltip: tooltip,
+                snapshot: latest,
+                transitionFrom: .fromTop
+            )
+        }
+        statusRotationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + StatusBarRotationMetrics.weeklyDisplayDuration,
+            execute: workItem
+        )
+    }
+
+    private func renderStatusItem(
+        title: String,
+        tooltip: String,
+        snapshot: QuotaSnapshot,
+        transitionFrom subtype: CATransitionSubtype? = nil
+    ) {
         let attributedTitle = NSAttributedString(
             string: title,
             attributes: [
@@ -170,6 +226,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .kern: -0.2
             ]
         )
+        if let subtype, let layer = statusButton?.layer {
+            let transition = CATransition()
+            transition.type = .push
+            transition.subtype = subtype
+            transition.duration = StatusBarRotationMetrics.animationDuration
+            transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(transition, forKey: "quota-title-push")
+        }
         statusButton?.attributedTitle = attributedTitle
         statusButton?.layer?.backgroundColor = snapshot.tagBackgroundColor.cgColor
         statusButton?.toolTip = tooltip
@@ -885,6 +949,7 @@ enum NotificationPermissionState: Equatable {
 final class QuotaStore: ObservableObject {
     @Published var snapshot: QuotaSnapshot
     @Published private(set) var isRefreshing = false
+    @Published private(set) var completedRefreshSequence = 0
     @Published var voiceBroadcastEnabled = false
     @Published var voiceBroadcastIntervalMinutes: Int
     @Published var notificationsEnabled: Bool
@@ -968,6 +1033,7 @@ final class QuotaStore: ObservableObject {
                 self.speakAfterRefresh = false
                 self.isRefreshing = false
                 self.apply(liveSnapshot)
+                self.completedRefreshSequence &+= 1
                 if shouldSpeak, self.voiceBroadcastEnabled {
                     self.speak(self.snapshot)
                 }
@@ -1690,6 +1756,12 @@ struct QuotaSnapshot: Sendable {
         guard !isUnavailable else { return "— | 无数据" }
         let prefix = freshness == .stale ? "! " : ""
         return "\(prefix)\(percentText) | \(shortResetText)"
+    }
+
+    var weeklyMenuBarTitle: String? {
+        guard !isUnavailable, hasSeparateWeeklyQuota else { return nil }
+        let prefix = freshness == .stale ? "! " : ""
+        return "\(prefix)周 \(weeklyPercentText) | \(compactResetText(for: weeklyResetDate))"
     }
 
     var diagnosticText: String {
