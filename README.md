@@ -217,6 +217,16 @@ Codex 额度不读取认证文件，也不读取或上传会话中的提示词�
 
 [MIT](LICENSE)
 
+## 来源与致谢
+
+本项目最初基于 [HappyChenchen/codex-meter](https://github.com/HappyChenchen/codex-meter) 的
+[`v0.1.0` / `b49a16f`](https://github.com/HappyChenchen/codex-meter/commit/b49a16f66c8d1e88aa99bcf2fef185f55989670b)
+演进，并继续遵循 MIT License。感谢原项目提供菜单栏额度工具的初始实现。
+
+当前的“Codex 额度”版本由 [wilsoncc0514](https://github.com/wilsoncc0514) 独立维护，后续新增了
+ChatGPT.app 本地 App Server 实时查询、隐私边界、缓存回退、通知、状态栏额度轮播、图标及发布流程。
+仓库独立维护不代表原作者或 OpenAI 对当前版本提供背书。
+
 ## 说明
 
 这个项目不是 OpenAI 官方项目。实时额度来自新版 ChatGPT.app 内置 App Server；该接口并非面向第三方承诺长期稳定的公开接口。降级状态下的数据可能与服务端真实状态存在短暂差异。
