@@ -1,16 +1,19 @@
 <div align="center">
 
+<img src="Resources/AppIcon-1024.png" width="128" alt="Codex 额度应用图标">
+
 # Codex 额度
 
-一个放在 macOS 菜单栏里的 Codex 额度小表。
+一个轻量、原生的 macOS 菜单栏 Codex 额度监控工具。
 
 [![macOS](https://img.shields.io/badge/macOS-14%2B-blue)](#系统要求)
 [![Swift](https://img.shields.io/badge/Swift-6.0-orange)](Package.swift)
+[![Version](https://img.shields.io/badge/version-0.4.0%20build%2014-17a673)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
 
-Codex 额度通过新版 ChatGPT.app 内置的 App Server 查询当前额度，并把最关键的信息放在菜单栏里：
+这是由 [wilsoncc0514](https://github.com/wilsoncc0514) 维护的 Codex 额度版本。它通过新版 ChatGPT.app 内置的 App Server 查询当前额度，并把最关键的信息放在菜单栏里：
 
 ```text
 61% | 3h08m
@@ -18,15 +21,15 @@ Codex 额度通过新版 ChatGPT.app 内置的 App Server 查询当前额度，�
 
 它没有自己的后端；实时查询只使用 ChatGPT.app 内置 CLI 的现有登录状态。不会调用旧版 Codex.app、PATH、Homebrew 或其他独立 `codex` CLI。实时查询不可用时，会自动降级读取本机会话日志。
 
-本项目纯 vibe coding：从真实使用场景出发，把 Codex 额度做成一个轻量、直观、常驻的菜单栏状态。
+当前版本包含实时 5 小时与周额度、刷新时的状态栏额度轮播、本地日志/缓存回退、额度恢复通知、登录时启动和隐私安全诊断。
 
 ## 界面预览
 
-![Codex 额度面板预览](https://raw.githubusercontent.com/HappyChenchen/codex-meter/main/docs/images/panel-preview.png?v=0.1.0)
+![Codex 额度面板预览](https://raw.githubusercontent.com/wilsoncc0514/codex-meter/main/docs/images/panel-preview.png?v=0.4.0)
 
 菜单栏状态会跟随 5 小时剩余额度变色：
 
-![Codex 额度用量颜色状态](https://raw.githubusercontent.com/HappyChenchen/codex-meter/main/docs/images/quota-states.svg?v=0.1.0)
+![Codex 额度用量颜色状态](https://raw.githubusercontent.com/wilsoncc0514/codex-meter/main/docs/images/quota-states.svg?v=0.4.0)
 
 ## 它能做什么
 
@@ -55,7 +58,7 @@ Codex 额度通过新版 ChatGPT.app 内置的 App Server 查询当前额度，�
 先把代码拉到本地：
 
 ```sh
-git clone https://github.com/HappyChenchen/codex-meter.git
+git clone https://github.com/wilsoncc0514/codex-meter.git
 cd codex-meter
 ```
 
