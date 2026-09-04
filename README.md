@@ -8,7 +8,7 @@
 
 [![macOS](https://img.shields.io/badge/macOS-14%2B-blue)](#系统要求)
 [![Swift](https://img.shields.io/badge/Swift-6.0-orange)](Package.swift)
-[![Version](https://img.shields.io/badge/version-0.4.0%20build%2014-17a673)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.2%20build%2016-17a673)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
@@ -33,6 +33,8 @@
 
 ## 它能做什么
 
+- 在主面板直接展示使用限额重置的可用次数和逐张到期时间（系统本地时区），无需二次点击。多张卡片可在明细区域滚动；仅展示，不消耗重置卡。
+- 重置卡数据来自 App Server 的 `rateLimitResetCredits`：次数以 `availableCount` 为准，明细缺失时明确提示；日志/缓存降级时不推测次数。接口字段见 [官方说明](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt)。
 - 只通过新版 ChatGPT.app 内置 App Server 实时查询额度
 - 查询前检查 ChatGPT 登录状态
 - 未登录时给出明确提示，并可打开 ChatGPT 登录

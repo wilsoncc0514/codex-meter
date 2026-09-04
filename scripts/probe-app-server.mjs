@@ -56,6 +56,12 @@ function handle(message) {
       return;
     }
     const limits = message.result?.rateLimits;
+    const resets = message.result?.rateLimitResetCredits;
+    console.log(`reset credits: available=${resets?.availableCount ?? "unknown"}, details=${Array.isArray(resets?.credits) ? resets.credits.length : "unknown"}`);
+    for (const credit of (Array.isArray(resets?.credits) ? resets.credits.slice(0, 100) : [])) {
+      const expiry = credit.expiresAt;
+      console.log(`reset expiry: ${typeof expiry === "number" && Number.isFinite(expiry) && expiry >= 0 && expiry <= 253402300799 ? new Date(expiry * 1000).toISOString() : "not provided"}`);
+    }
     console.log(`rate limits: limit=${limits?.limitId ?? "unknown"}, primary=${limits?.primary?.usedPercent ?? "unknown"}, secondary=${limits?.secondary?.usedPercent ?? "unknown"}`);
     finish(0);
   }

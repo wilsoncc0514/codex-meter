@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-VERSION="${CODEX_METER_VERSION:-0.4.0}"
-BUILD_NUMBER="${CODEX_METER_BUILD_NUMBER:-14}"
+VERSION="${CODEX_METER_VERSION:-0.4.2}"
+BUILD_NUMBER="${CODEX_METER_BUILD_NUMBER:-16}"
 if [ "${CODEX_METER_UNIVERSAL:-0}" = "1" ]; then
   ARCH="universal"
 else
