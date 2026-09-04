@@ -21,7 +21,7 @@ struct CodexMeterApp: App {
 
 private enum PanelMetrics {
     static let cardWidth: CGFloat = 360
-    static let cardHeight: CGFloat = 220
+    static let cardHeight: CGFloat = 392
     static let windowPadding: CGFloat = 14
     static let width: CGFloat = cardWidth + windowPadding * 2
     static let height: CGFloat = cardHeight + windowPadding * 2
@@ -364,6 +364,9 @@ struct StatusPanelView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     header
                     quotaOverview
+                    Divider()
+                    ResetCreditsDetails(summary: store.snapshot.resetCredits)
+                    Spacer(minLength: 0)
                 }
                 .padding(18)
             }
@@ -1651,6 +1654,8 @@ final class SessionLogMonitor: @unchecked Sendable {
 }
 
 struct QuotaSnapshot: Sendable {
+    // Live-only: old quota caches and session logs cannot establish remaining cards.
+    var resetCredits: ResetCredits? = nil
     var remainingPercent: Int
     var weeklyRemainingPercent: Int
     var resetDate: Date
@@ -1677,6 +1682,7 @@ struct QuotaSnapshot: Sendable {
             return
         }
         let effectiveWeekly = weekly ?? primary
+        resetCredits = reading.resetCredits
         remainingPercent = Self.remaining(from: primary.usedPercent)
         weeklyRemainingPercent = Self.remaining(from: effectiveWeekly.usedPercent)
         resetDate = primary.resetsAt

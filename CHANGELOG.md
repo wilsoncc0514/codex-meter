@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.2] - 2026-09-04
+
+### Changed
+- Show reset-card expirations directly in the main panel, removing the extra click and nested popover.
+- Bound inline card details to a scrollable area while retaining unavailable/partial-data notices.
+
+## [0.4.1] - 2026-09-04
+
+### Added
+- Read-only earned reset count and per-card expiration details from the existing App Server quota response.
+- Explicit unknown/partial-detail states, bounded detail lists, local timezone dates, and no redemption action.
+- Parser regression coverage for older responses, malformed details, and service-authoritative counts.
+
 ## [0.4.0] - 2026-08-31
 
 ### Added

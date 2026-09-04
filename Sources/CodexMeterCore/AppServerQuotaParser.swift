@@ -18,7 +18,8 @@ public enum AppServerQuotaParser {
             dataTimestamp: now,
             checkedAt: now,
             diagnostic: .ready,
-            quotaEventCount: 1
+            quotaEventCount: 1,
+            resetCredits: ResetCredits.parse(result["rateLimitResetCredits"])
         )
     }
 

@@ -46,6 +46,7 @@ public enum QuotaFreshness: String, Equatable, Sendable {
 }
 
 public struct QuotaReading: Equatable, Sendable {
+    public let resetCredits: ResetCredits?
     public let windows: [QuotaWindow]
     public let dataTimestamp: Date?
     public let checkedAt: Date
@@ -57,13 +58,15 @@ public struct QuotaReading: Equatable, Sendable {
         dataTimestamp: Date?,
         checkedAt: Date,
         diagnostic: QuotaDiagnostic,
-        quotaEventCount: Int
+        quotaEventCount: Int,
+        resetCredits: ResetCredits? = nil
     ) {
         self.windows = windows
         self.dataTimestamp = dataTimestamp
         self.checkedAt = checkedAt
         self.diagnostic = diagnostic
         self.quotaEventCount = quotaEventCount
+        self.resetCredits = resetCredits
     }
 
     public var freshness: QuotaFreshness? {
