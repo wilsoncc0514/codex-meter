@@ -1,0 +1,12 @@
+{
+  "refreshSeconds": 300,
+  "requestTimeoutSeconds": 15,
+  "width": 156,
+  "gap": 8,
+  "xOffset": 0,
+  "yOffset": 0,
+  "notifyOnReset": true,
+  "rotateSeconds": 6,
+  "autoRotate": true,
+  "appServerPath": ""
+}

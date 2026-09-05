@@ -23,7 +23,11 @@
 
 当前版本包含实时 5 小时与周额度、刷新时的状态栏额度轮播、本地日志/缓存回退、额度恢复通知、登录时启动和隐私安全诊断。
 
-## 界面预览
+## Windows 任务栏适配
+
+Windows 用户可使用独立的 [BAT 任务栏组件](windows-tray/README.md)：平时显示 5 小时额度，每 5 分钟通过 App Server 联网刷新，成功后短暂展示周额度和重置卡次数，再回到常驻页。支持中文右键菜单、到期明细、开机启动和异常重启；不影响下方 macOS 应用。
+
+## macOS 界面预览
 
 ![Codex 额度面板预览](https://raw.githubusercontent.com/wilsoncc0514/codex-meter/main/docs/images/panel-preview.png?v=0.4.0)
 

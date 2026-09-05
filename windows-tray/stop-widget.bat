@@ -1,0 +1,3 @@
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$root=Join-Path $env:LOCALAPPDATA 'CodexMeter'; $flag=Join-Path $root 'stop.flag'; New-Item -ItemType Directory -Force -Path $root | Out-Null; Set-Content -LiteralPath $flag -Value 'stop-bat' -Encoding Ascii; foreach($name in @('widget.pid','watchdog.pid')){$pidFile=Join-Path $root $name; if(Test-Path -LiteralPath $pidFile){$processId=[int](Get-Content -Raw -LiteralPath $pidFile); Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue}}"
+exit /b 0
