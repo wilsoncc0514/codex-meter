@@ -29,7 +29,7 @@ taskbar-widget.json：
 
 - rotateSeconds：分页间隔，3–60 秒，默认 6
 - autoRotate：刷新后轮播；也可从右键菜单保存开关。手动切页仍可使用，看完后自动回到 5 小时页
-- appServerPath：可选 codex.exe 完整路径；空值通过 PATH 查找
+- appServerPath：可选 codex.exe 完整路径；缺失或失效时重新扫描本机 OpenAI/Codex/bin 版本目录，再检查 PATH，支持开机启动与应用更新后的路径变化
 - refreshSeconds：联网刷新间隔，30–3600 秒
 - requestTimeoutSeconds：单路径超时，5–60 秒
 - width：文字区域宽度，120–220
@@ -37,6 +37,8 @@ taskbar-widget.json：
 - notifyOnReset：额度恢复通知开关
 
 编辑文件后重启组件。
+
+超时状态左键点击立即重试，并显示“刷新中”；正常状态左键仍用于切页。右键“立即刷新”在所有状态下可用，已有查询运行时不会重复发起。
 
 ## 日志与测试
 

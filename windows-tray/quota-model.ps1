@@ -1,4 +1,17 @@
 # Pure parsing/formatting helpers; safe to dot-source in tests and background runspaces.
+function Resolve-CodexExecutable([string]$ConfiguredPath) {
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPath) -and (Test-Path -LiteralPath $ConfiguredPath -PathType Leaf)) { return $ConfiguredPath }
+    # Login-started processes retain an old PATH; desktop updates use versioned directories.
+    $binRoot = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
+    $candidates = @(Get-ChildItem -LiteralPath $binRoot -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName 'codex.exe') -ErrorAction SilentlyContinue } |
+        Sort-Object LastWriteTimeUtc -Descending)
+    if ($candidates.Count -gt 0) { return $candidates[0].FullName }
+    $command = Get-Command codex.exe -ErrorAction SilentlyContinue
+    if ($null -ne $command -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
+    return $null
+}
+
 function Get-NextQuotaPage([int]$Page, [int]$Count) {
     if ($Page -le 0 -or $Page + 1 -ge $Count) { return [pscustomobject]@{page=0;active=$false} }
     return [pscustomobject]@{page=($Page+1);active=$true}

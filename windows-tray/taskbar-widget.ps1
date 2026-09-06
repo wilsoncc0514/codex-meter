@@ -477,7 +477,9 @@ function Render-CodexWidget {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $pages = @()
     $details = @()
-    if ($script:codexFetchFailed) {
+    if ($null -ne $script:codexFetch -and ($script:codexFetchFailed -or $null -eq $script:codexSnapshot)) {
+        $pages += ,@((CN '\u5237\u65b0\u4e2d'), '--')
+    } elseif ($script:codexFetchFailed) {
         $pages += ,@($codexTimeoutText, (CN '\u8054\u7f51\u83b7\u53d6\u5931\u8d25'))
     } elseif ($null -eq $script:codexSnapshot) {
         $pages += ,@((CN '\u83b7\u53d6\u4e2d'), '--')
@@ -523,11 +525,8 @@ function Render-CodexWidget {
 
 function Update-CodexWidget {
     if ($null -ne $script:codexFetch) { return }
-    $exe = [string]$codexConfig.appServerPath
-    if ([string]::IsNullOrWhiteSpace($exe)) {
-        $command = Get-Command codex.exe -ErrorAction SilentlyContinue
-        if ($null -ne $command) { $exe = $command.Source }
-    }
+    $exe = Resolve-CodexExecutable ([string]$codexConfig.appServerPath)
+    Write-CodexLog 'INFO' ('Refresh requested. ExecutableFound=' + (-not [string]::IsNullOrWhiteSpace($exe)))
     $worker = [PowerShell]::Create()
     [void]$worker.AddScript({
         param($model, $executable, $timeout)
@@ -536,6 +535,7 @@ function Update-CodexWidget {
         Get-AppQuota $executable $timeout
     }).AddArgument((Join-Path $PSScriptRoot 'quota-model.ps1')).AddArgument($exe).AddArgument([int]$codexConfig.requestTimeoutSeconds)
     $script:codexFetch = [pscustomobject]@{worker=$worker;handle=$worker.BeginInvoke()}
+    Render-CodexWidget
 }
 
 function Complete-CodexFetch {
@@ -624,6 +624,10 @@ $codexForm.Add_MouseWheel({
 $codexForm.Add_MouseClick({
     param($sender,$eventArgs)
     if ($eventArgs.Button -eq [Windows.Forms.MouseButtons]::Left) {
+        if ($script:codexFetchFailed -or $null -eq $script:codexSnapshot) {
+            Update-CodexWidget
+            return
+        }
         $script:codexPage++
         $script:codexRotationActive = $true
         $script:codexNextPage = [DateTime]::UtcNow.AddSeconds($codexConfig.rotateSeconds)

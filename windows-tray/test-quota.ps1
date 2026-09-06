@@ -57,6 +57,12 @@ Render-CodexWidget
 Assert ($codexForm.TopLine -eq 'TIMEOUT' -and $script:codexPageCount -eq 1) 'Failure must hide stale credits'
 'Offline assertions passed.'
 if ($Live) {
-    $snapshot = Get-AppQuota (Get-Command codex.exe).Source 20
+    $savedPath = $env:PATH
+    try {
+        $env:PATH = Join-Path $env:SystemRoot 'System32'
+        $resolved = Resolve-CodexExecutable 'C:\missing-codex-version\codex.exe'
+        Assert (-not [string]::IsNullOrWhiteSpace($resolved)) 'Resolve installed executable without PATH and with stale config'
+        $snapshot = Get-AppQuota $resolved 20
+    } finally { $env:PATH = $savedPath }
     [pscustomobject]@{source=$snapshot.source; windows=$snapshot.windows.Count; resetCount=$snapshot.credits.availableCount; detailCount=@($snapshot.credits.credits).Count} | ConvertTo-Json
 }
