@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3] - 2026-09-28
+
+### Fixed
+- Restored live refresh after the Codex desktop update moved the bundled CLI from `ChatGPT.app` to `Codex.app`.
+- Prefer the current official `Codex.app` while retaining compatibility with the legacy `ChatGPT.app` host.
+- Continue rejecting arbitrary standalone, `PATH`, Homebrew, and untrusted app-bundle executables.
+
 ## [0.4.2] - 2026-09-04
 
 ### Changed
