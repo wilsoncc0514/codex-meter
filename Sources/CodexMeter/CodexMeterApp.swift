@@ -707,7 +707,7 @@ struct ActionsPopover: View {
                 } label: {
                     ActionMenuRow(
                         systemImage: "person.crop.circle.badge.exclamationmark",
-                        title: "打开 ChatGPT 登录",
+                        title: "打开 Codex 登录",
                         trailing: nil
                     )
                 }
@@ -1232,24 +1232,18 @@ final class QuotaStore: ObservableObject {
     }
 
     func openChatGPTForLogin() {
-        let candidates = [
-            NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.chat"),
-            NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.chatgpt"),
-            URL(fileURLWithPath: "/Applications/ChatGPT.app"),
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Applications/ChatGPT.app")
-        ].compactMap { $0 }
+        let candidates = ChatGPTCLIExecutableLocator.applicationCandidates()
         guard let appURL = candidates.first(where: {
             FileManager.default.fileExists(atPath: $0.path)
         }) else {
-            settingsMessage = "未找到 ChatGPT.app，请先安装新版 ChatGPT 桌面应用"
+            settingsMessage = "未找到 Codex.app 或 ChatGPT.app，请先安装并登录 Codex"
             return
         }
 
         if NSWorkspace.shared.open(appURL) {
-            settingsMessage = "请在 ChatGPT 中完成登录，然后返回刷新"
+            settingsMessage = "请在 Codex 中完成登录，然后返回刷新"
         } else {
-            settingsMessage = "无法打开 ChatGPT，请手动打开并登录"
+            settingsMessage = "无法打开 Codex，请手动打开并登录"
         }
     }
 
@@ -1262,7 +1256,7 @@ final class QuotaStore: ObservableObject {
         Path: \(bundle.bundleURL.path)
         Status: \(snapshot.diagnosticText)
         Source: \(snapshot.sourceName)
-        ChatGPT CLI: \(ChatGPTCLIExecutableLocator.diagnosticExecutablePath())
+        Codex CLI: \(ChatGPTCLIExecutableLocator.diagnosticExecutablePath())
         Login required: \(snapshot.requiresCodexLogin ? "yes" : "no")
         Window: \(snapshot.primaryWindowMinutes) minutes
         Remaining: \(snapshot.isUnavailable ? "unknown" : "\(snapshot.remainingPercent)%")
@@ -1505,9 +1499,9 @@ final class HybridQuotaProvider: @unchecked Sendable, QuotaProvider {
             var snapshot = fallback.currentSnapshot()
             snapshot.requiresCodexLogin = requiresLogin
             if requiresLogin {
-                snapshot.sourceName = snapshot.isUnavailable ? "请先登录 ChatGPT" : "会话日志（需登录）"
+                snapshot.sourceName = snapshot.isUnavailable ? "请先登录 Codex" : "会话日志（需登录）"
             } else if executableMissing {
-                snapshot.sourceName = snapshot.isUnavailable ? "未找到新版 ChatGPT" : "会话日志（未找到新版 ChatGPT）"
+                snapshot.sourceName = snapshot.isUnavailable ? "未找到 Codex" : "会话日志（未找到 Codex）"
             } else if transientFailure {
                 snapshot.sourceName = snapshot.isUnavailable ? "实时接口暂时不可用" : "会话日志（实时查询异常）"
             } else {

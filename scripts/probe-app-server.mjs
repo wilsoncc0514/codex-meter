@@ -2,7 +2,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 
-const executable = process.argv[2] ?? "/Applications/ChatGPT.app/Contents/Resources/codex";
+const executable = process.argv[2] ?? "/Applications/Codex.app/Contents/Resources/codex";
 const version = spawnSync(executable, ["--version"], { encoding: "utf8" });
 console.log(`version: ${(version.stdout || version.stderr).trim()}`);
 

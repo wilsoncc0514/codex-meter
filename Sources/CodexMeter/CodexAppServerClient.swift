@@ -20,25 +20,25 @@ enum CodexAppServerError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .executableNotFound(details):
-            "未找到 ChatGPT.app 内置 CLI：\(details)"
+            "未找到 Codex.app 或 ChatGPT.app 内置 CLI：\(details)"
         case let .launchFailed(message):
-            "无法启动 ChatGPT CLI：\(message)"
+            "无法启动 Codex CLI：\(message)"
         case let .requestTimedOut(method, seconds):
-            "ChatGPT App Server 在 \(method) 阶段等待超过 \(Int(seconds)) 秒"
+            "Codex App Server 在 \(method) 阶段等待超过 \(Int(seconds)) 秒"
         case let .connectionClosed(details):
             if let details, !details.isEmpty {
-                "ChatGPT App Server 连接已关闭：\(details)"
+                "Codex App Server 连接已关闭：\(details)"
             } else {
-                "ChatGPT App Server 连接已关闭"
+                "Codex App Server 连接已关闭"
             }
         case let .chatGPTLoginRequired(accountType):
             accountType == nil
-                ? "ChatGPT 尚未登录"
-                : "当前账户模式为 \(accountType ?? "unknown")，需要 ChatGPT 登录"
+                ? "Codex 尚未登录"
+                : "当前账户模式为 \(accountType ?? "unknown")，需要 Codex 登录"
         case let .serverError(code, message):
-            "ChatGPT App Server 错误 \(code)：\(message)"
+            "Codex App Server 错误 \(code)：\(message)"
         case .unexpectedResponse:
-            "ChatGPT App Server 返回了无法识别的数据"
+            "Codex App Server 返回了无法识别的数据"
         }
     }
 
@@ -113,7 +113,7 @@ final class CodexAppServerClient: @unchecked Sendable, AppServerQuotaClient {
     }
 
     func setUpdateHandler(_ handler: UpdateHandler?) {
-        // Each refresh uses a short-lived ChatGPT App Server process.
+        // Each refresh uses a short-lived Codex App Server process.
         // The 60-second timer and session-log monitor provide bounded updates.
     }
 }
@@ -281,28 +281,40 @@ enum ChatGPTCLIExecutableLocator {
     ]
 
     static var failureDetails: String {
-        "只检查 ChatGPT.app，不再检查 Codex.app、PATH、Homebrew 或独立 codex CLI"
+        "只检查 OpenAI Codex.app/ChatGPT.app，不检查 PATH、Homebrew 或独立 codex CLI"
+    }
+
+    static func applicationCandidates(
+        fileManager: FileManager = .default,
+        workspace: NSWorkspace = .shared
+    ) -> [URL] {
+        let home = fileManager.homeDirectoryForCurrentUser
+        let explicitApps = [
+            URL(fileURLWithPath: "/Applications/Codex.app"),
+            home.appendingPathComponent("Applications/Codex.app"),
+            URL(fileURLWithPath: "/Applications/ChatGPT.app"),
+            home.appendingPathComponent("Applications/ChatGPT.app")
+        ]
+        let registeredApps = bundleIdentifiers.compactMap {
+            workspace.urlForApplication(withBundleIdentifier: $0)
+        }
+        return explicitApps + registeredApps
     }
 
     static func resolve(
         fileManager: FileManager = .default,
         workspace: NSWorkspace = .shared
     ) -> URL? {
-        let registeredApps = bundleIdentifiers.compactMap {
-            workspace.urlForApplication(withBundleIdentifier: $0)
-        }
-        let home = fileManager.homeDirectoryForCurrentUser
-        let apps = registeredApps + [
-            URL(fileURLWithPath: "/Applications/ChatGPT.app"),
-            home.appendingPathComponent("Applications/ChatGPT.app")
-        ]
-        return find(in: apps, fileManager: fileManager)
+        find(
+            in: applicationCandidates(fileManager: fileManager, workspace: workspace),
+            fileManager: fileManager
+        )
     }
 
     static func find(in appURLs: [URL], fileManager: FileManager = .default) -> URL? {
         var seen = Set<String>()
         for appURL in appURLs where seen.insert(appURL.standardizedFileURL.path).inserted {
-            guard isChatGPTBundle(appURL, fileManager: fileManager) else { continue }
+            guard isOfficialHostBundle(appURL, fileManager: fileManager) else { continue }
             let candidates = [
                 appURL.appendingPathComponent("Contents/Resources/codex"),
                 appURL.appendingPathComponent("Contents/Resources/codex/codex")
@@ -316,7 +328,7 @@ enum ChatGPTCLIExecutableLocator {
         return nil
     }
 
-    private static func isChatGPTBundle(
+    private static func isOfficialHostBundle(
         _ appURL: URL,
         fileManager: FileManager
     ) -> Bool {
@@ -329,11 +341,17 @@ enum ChatGPTCLIExecutableLocator {
               ) as? [String: Any] else {
             return false
         }
+        guard let bundleIdentifier = info["CFBundleIdentifier"] as? String,
+              bundleIdentifiers.contains(bundleIdentifier) else {
+            return false
+        }
         let names = [
             info["CFBundleName"] as? String,
             info["CFBundleDisplayName"] as? String
-        ].compactMap { $0?.lowercased() }
-        return names.contains("chatgpt")
+        ].compactMap {
+            $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        return names.contains("codex") || names.contains("chatgpt")
     }
 
     static func diagnosticExecutablePath() -> String {

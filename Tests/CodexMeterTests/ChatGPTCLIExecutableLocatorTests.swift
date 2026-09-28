@@ -3,32 +3,41 @@ import Testing
 @testable import CodexMeter
 
 struct ChatGPTCLIExecutableLocatorTests {
-    @Test func findsOnlyExecutableInsideProvidedChatGPTBundle() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-        let app = root.appendingPathComponent("ChatGPT.app")
-        let executable = app.appendingPathComponent("Contents/Resources/codex")
-        let info = app.appendingPathComponent("Contents/Info.plist")
-        try FileManager.default.createDirectory(
-            at: executable.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        let infoData = try PropertyListSerialization.data(
-            fromPropertyList: ["CFBundleName": "ChatGPT"],
-            format: .xml,
-            options: 0
-        )
-        #expect(FileManager.default.createFile(atPath: info.path, contents: infoData))
-        #expect(FileManager.default.createFile(atPath: executable.path, contents: Data()))
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
-            ofItemAtPath: executable.path
-        )
-        defer { try? FileManager.default.removeItem(at: root) }
+    @Test func findsExecutableInsideOfficialChatGPTBundle() throws {
+        let fixture = try makeApp(named: "ChatGPT", bundleIdentifier: "com.openai.codex")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
 
         #expect(
-            ChatGPTCLIExecutableLocator.find(in: [app])?.standardizedFileURL
-                == executable.standardizedFileURL
+            ChatGPTCLIExecutableLocator.find(in: [fixture.app])?.standardizedFileURL
+                == fixture.executable.standardizedFileURL
+        )
+    }
+
+    @Test func findsExecutableInsideOfficialCodexBundle() throws {
+        let fixture = try makeApp(named: "Codex", bundleIdentifier: "com.openai.codex")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        #expect(
+            ChatGPTCLIExecutableLocator.find(in: [fixture.app])?.standardizedFileURL
+                == fixture.executable.standardizedFileURL
+        )
+    }
+
+    @Test func skipsRegisteredHostWithoutCLIAndFindsCodexHost() throws {
+        let chatGPT = try makeApp(
+            named: "ChatGPT",
+            bundleIdentifier: "com.openai.codex",
+            executable: false
+        )
+        let codex = try makeApp(named: "Codex", bundleIdentifier: "com.openai.codex")
+        defer {
+            try? FileManager.default.removeItem(at: chatGPT.root)
+            try? FileManager.default.removeItem(at: codex.root)
+        }
+
+        #expect(
+            ChatGPTCLIExecutableLocator.find(in: [chatGPT.app, codex.app])?.standardizedFileURL
+                == codex.executable.standardizedFileURL
         )
     }
 
@@ -38,14 +47,31 @@ struct ChatGPTCLIExecutableLocatorTests {
         #expect(ChatGPTCLIExecutableLocator.failureDetails.contains("独立 codex CLI"))
     }
 
-    @Test func rejectsOldCodexAppEvenWhenItContainsAnExecutable() throws {
+    @Test func rejectsUntrustedBundleEvenWhenNamedCodex() throws {
+        let fixture = try makeApp(named: "Codex", bundleIdentifier: "example.untrusted.codex")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        #expect(ChatGPTCLIExecutableLocator.find(in: [fixture.app]) == nil)
+    }
+
+    private func makeApp(
+        named name: String,
+        bundleIdentifier: String,
+        executable shouldCreateExecutable: Bool = true
+    ) throws -> (root: URL, app: URL, executable: URL) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
-        let app = root.appendingPathComponent("Codex.app")
-        let resources = app.appendingPathComponent("Contents/Resources")
-        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        let app = root.appendingPathComponent("\(name).app")
+        let executable = app.appendingPathComponent("Contents/Resources/codex")
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
         let infoData = try PropertyListSerialization.data(
-            fromPropertyList: ["CFBundleName": "Codex"],
+            fromPropertyList: [
+                "CFBundleName": name,
+                "CFBundleIdentifier": bundleIdentifier
+            ],
             format: .xml,
             options: 0
         )
@@ -55,14 +81,13 @@ struct ChatGPTCLIExecutableLocatorTests {
                 contents: infoData
             )
         )
-        let executable = resources.appendingPathComponent("codex")
-        #expect(FileManager.default.createFile(atPath: executable.path, contents: Data()))
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
-            ofItemAtPath: executable.path
-        )
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        #expect(ChatGPTCLIExecutableLocator.find(in: [app]) == nil)
+        if shouldCreateExecutable {
+            #expect(FileManager.default.createFile(atPath: executable.path, contents: Data()))
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: executable.path
+            )
+        }
+        return (root, app, executable)
     }
 }
