@@ -1,0 +1,21 @@
+name: macOS build and tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: swift test
+      - name: Assemble and verify app
+        run: |
+          ./scripts/build-app.sh
+          test -x 'build/Codex 额度.app/Contents/MacOS/CodexMeter'
+          test -f 'build/Codex 额度.app/Contents/Resources/AppIcon.icns'
+          codesign --verify --deep --strict 'build/Codex 额度.app'

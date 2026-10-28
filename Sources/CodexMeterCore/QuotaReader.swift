@@ -52,6 +52,7 @@ public struct QuotaReading: Equatable, Sendable {
     public let checkedAt: Date
     public let diagnostic: QuotaDiagnostic
     public let quotaEventCount: Int
+    public let accountIdentity: String?
 
     public init(
         windows: [QuotaWindow],
@@ -59,7 +60,8 @@ public struct QuotaReading: Equatable, Sendable {
         checkedAt: Date,
         diagnostic: QuotaDiagnostic,
         quotaEventCount: Int,
-        resetCredits: ResetCredits? = nil
+        resetCredits: ResetCredits? = nil,
+        accountIdentity: String? = nil
     ) {
         self.windows = windows
         self.dataTimestamp = dataTimestamp
@@ -67,6 +69,7 @@ public struct QuotaReading: Equatable, Sendable {
         self.diagnostic = diagnostic
         self.quotaEventCount = quotaEventCount
         self.resetCredits = resetCredits
+        self.accountIdentity = accountIdentity
     }
 
     public var freshness: QuotaFreshness? {

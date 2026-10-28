@@ -38,6 +38,12 @@ struct ResetCreditsPresentationTests {
             let data = try #require(bitmap.representation(using: .png, properties: [:]))
             try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
         }
+        let oldNewsSetting = UserDefaults.standard.object(forKey: "publicResetNews.enabled")
+        defer {
+            if let oldNewsSetting { UserDefaults.standard.set(oldNewsSetting, forKey: "publicResetNews.enabled") }
+            else { UserDefaults.standard.removeObject(forKey: "publicResetNews.enabled") }
+        }
+        UserDefaults.standard.set(true, forKey: "publicResetNews.enabled")
         let store = QuotaStore()
         let reading = QuotaReading(windows: [
             QuotaWindow(usedPercent: 20, resetsAt: Date().addingTimeInterval(3600), windowMinutes: 300),
@@ -46,13 +52,27 @@ struct ResetCreditsPresentationTests {
            resetCredits: samples[0].1)
         store.snapshot = QuotaSnapshot(reading: reading, sourceName: "官方实时接口")
         let panel = NSHostingView(rootView: StatusPanelView(store: store))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 388, height: 420), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 388, height: 488), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = panel
-        panel.frame = NSRect(x: 0, y: 0, width: 388, height: 420)
+        panel.frame = NSRect(x: 0, y: 0, width: 388, height: 488)
         panel.layoutSubtreeIfNeeded()
         let bitmap = try #require(panel.bitmapImageRepForCachingDisplay(in: panel.bounds))
         panel.cacheDisplay(in: panel.bounds, to: bitmap)
         try #require(bitmap.representation(using: .png, properties: [:]))
             .write(to: URL(fileURLWithPath: directory).appendingPathComponent("panel.png"))
+
+        let now = Date()
+        let event = PublicResetEvent(id: "preview", status: "announced", title: "Codex 额度重置预告",
+                                     updatedAt: now, confirmedAt: nil,
+                                     schedule: .init(from: now, through: now.addingTimeInterval(7200)))
+        let news = NSHostingView(rootView: PublicResetNewsView(state: .event(event, stale: false)))
+        let newsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 324, height: 85), styleMask: [.borderless], backing: .buffered, defer: false)
+        newsWindow.contentView = news
+        news.frame = NSRect(x: 0, y: 0, width: 324, height: 85)
+        news.layoutSubtreeIfNeeded()
+        let newsBitmap = try #require(news.bitmapImageRepForCachingDisplay(in: news.bounds))
+        news.cacheDisplay(in: news.bounds, to: newsBitmap)
+        try #require(newsBitmap.representation(using: .png, properties: [:]))
+            .write(to: URL(fileURLWithPath: directory).appendingPathComponent("news.png"))
     }
 }

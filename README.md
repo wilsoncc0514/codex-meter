@@ -8,7 +8,7 @@
 
 [![macOS](https://img.shields.io/badge/macOS-14%2B-blue)](#系统要求)
 [![Swift](https://img.shields.io/badge/Swift-6.0-orange)](Package.swift)
-[![Version](https://img.shields.io/badge/version-0.4.3%20build%2017-17a673)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.4%20build%2018-17a673)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
@@ -21,7 +21,14 @@
 
 它没有自己的后端；实时查询只使用 OpenAI Codex.app（兼容旧版 ChatGPT.app 宿主）内置 CLI 的现有登录状态。不会调用 PATH、Homebrew 或其他独立 `codex` CLI。实时查询不可用时，会自动降级读取本机会话日志。
 
-当前版本包含实时 5 小时与周额度、刷新时的状态栏额度轮播、本地日志/缓存回退、额度恢复通知、登录时启动和隐私安全诊断。
+当前版本包含实时 5 小时与周额度、刷新时的状态栏额度轮播、重置卡到期时间、可选公开重置消息、本地日志/缓存回退、额度恢复通知、登录时启动和隐私安全诊断。
+
+## 0.4.4 更新
+
+- 增加可选的公开重置消息，在面板中显示 AIhot 报道的预告或确认、预计时间和来源链接。默认关闭，可在“更多”中开启。
+- 兼容新版桌面应用的 CLI 目录，并在服务进程输出关闭时及时停止读取，减少异常退出后的资源占用。
+- 检测到账号变化或无法确认账号时，重建额度恢复通知的比较基线，减少切换账号导致的误报。
+- 根据活跃状态与低电量模式调整查询频率，并增加 macOS 自动构建与测试配置。
 
 ## 界面预览
 
@@ -42,7 +49,8 @@
 - 在菜单栏显示主要额度和恢复倒计时
 - 区分数据产生时间、检查时间、延迟和过期状态
 - 手动刷新会主动查询官方额度
-- 以 60 秒轮询和会话日志变更监听更新额度
+- 活跃时每分钟、空闲或低电量模式下最多每 5 分钟查询，并监听会话日志变更
+- 可选显示 AIhot 的公开重置预告与报道；默认关闭，与账户实际重置卡分开展示
 - 自然重置时发送本地通知
 - 检测计划外的额度提前恢复或大幅回升，二次确认后通知
 - 跨重启记录已通知事件，避免重复提醒
@@ -107,6 +115,8 @@ CODEX_METER_UNIVERSAL=1 ./scripts/package-release.sh
 ```
 
 ## 数据从哪里来
+
+“更多 → 公开重置消息”默认关闭。开启后每 15 分钟向第三方 [AIhot 重置监控](https://aihot.news/codex-reset) 请求公开报道；请求不携带账户、额度或会话数据，但第三方可见正常网络连接信息。消息不是 OpenAI 的账户权益确认，不影响额度结果。请求失败时会提示不可用或标记上次消息可能过期；遇到限流会退避。关闭后停止请求。
 
 默认情况下，Codex 额度只启动官方 Codex.app 内置的 `codex app-server`，并兼容旧版 ChatGPT.app 宿主，按 App Server 协议调用：
 
@@ -232,3 +242,5 @@ Codex.app 本地 App Server 实时查询、隐私边界、缓存回退、通知�
 ## 说明
 
 这个项目不是 OpenAI 官方项目。实时额度来自 Codex.app 内置 App Server；该接口并非面向第三方承诺长期稳定的公开接口。降级状态下的数据可能与服务端真实状态存在短暂差异。
+
+0.4.4 的公开重置消息展示、App Server 兼容与管道清理、自适应刷新和账户切换保护参考了 [guanbear/Pulse-codex-reset](https://github.com/guanbear/Pulse-codex-reset)（检查基准 [`74175c0`](https://github.com/guanbear/Pulse-codex-reset/commit/74175c04000957e72f984779e4fcde191cc94fac)）及其上游 [qunqin24/Pulse](https://github.com/qunqin24/Pulse)。这两个项目采用 Apache-2.0 许可证；感谢维护者和贡献者。本项目独立维护，不代表对方或 OpenAI 为本项目背书。

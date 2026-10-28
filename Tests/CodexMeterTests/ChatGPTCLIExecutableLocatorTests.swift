@@ -23,6 +23,16 @@ struct ChatGPTCLIExecutableLocatorTests {
         )
     }
 
+    @Test func findsNewBundledCLILayout() throws {
+        let fixture = try makeApp(named: "ChatGPT", bundleIdentifier: "com.openai.codex", executable: false)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let executable = fixture.app.appendingPathComponent("Contents/Resources/codex-cli/bin/codex")
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        #expect(FileManager.default.createFile(atPath: executable.path, contents: Data()))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        #expect(ChatGPTCLIExecutableLocator.find(in: [fixture.app])?.standardizedFileURL == executable.standardizedFileURL)
+    }
+
     @Test func skipsRegisteredHostWithoutCLIAndFindsCodexHost() throws {
         let chatGPT = try makeApp(
             named: "ChatGPT",
