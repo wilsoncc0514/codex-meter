@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.4] - 2026-10-28
+
+### Added
+- Optional public reset news from AIhot, disabled by default and separate from account quota.
+- macOS build and test workflow.
+
+### Changed
+- Adapt automatic polling to activity and low-power mode, with a five-minute idle limit.
+- Clear quota recovery baselines when account identity changes or cannot be verified.
+
+### Fixed
+- Discover the newer desktop-bundled Codex CLI layout.
+- Stop reading closed App Server pipes promptly.
+
 ## [0.4.3] - 2026-09-28
 
 ### Fixed

@@ -22,9 +22,13 @@ struct CodexMeterApp: App {
 private enum PanelMetrics {
     static let cardWidth: CGFloat = 360
     static let cardHeight: CGFloat = 392
+    static let newsCardHeight: CGFloat = 460
     static let windowPadding: CGFloat = 14
     static let width: CGFloat = cardWidth + windowPadding * 2
     static let height: CGFloat = cardHeight + windowPadding * 2
+    static func height(newsEnabled: Bool) -> CGFloat {
+        (newsEnabled ? newsCardHeight : cardHeight) + windowPadding * 2
+    }
     static let verticalGap: CGFloat = 14
     static let screenPadding: CGFloat = 8
 }
@@ -50,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var outsideClickMonitor: Any?
     private var snapshotCancellable: AnyCancellable?
     private var refreshSequenceCancellable: AnyCancellable?
+    private var newsSettingCancellable: AnyCancellable?
     private var statusRotationWorkItem: DispatchWorkItem?
     private var installationMonitor: Timer?
     private var launchedExecutableIdentity: ExecutableIdentity?
@@ -63,6 +68,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureWakeRefreshObservers()
         configureInstallationMonitor()
         quotaStore.start()
+        newsSettingCancellable = quotaStore.$publicNewsEnabled.dropFirst().sink { [weak self] enabled in
+            guard let self, let button = self.statusButton else { return }
+            self.positionPanel(relativeTo: button, newsEnabled: enabled)
+        }
 
         snapshotCancellable = quotaStore.$snapshot.sink { [weak self] snapshot in
             self?.updateStatusItem(with: snapshot)
@@ -103,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configurePanelWindow() {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: PanelMetrics.width, height: PanelMetrics.height),
+            contentRect: NSRect(x: 0, y: 0, width: PanelMetrics.width, height: PanelMetrics.height(newsEnabled: quotaStore.publicNewsEnabled)),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -116,7 +125,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentViewController = NSHostingController(
             rootView: StatusPanelView(store: quotaStore)
-                .frame(width: PanelMetrics.width, height: PanelMetrics.height)
         )
         self.panelWindow = panel
     }
@@ -250,6 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             positionPanel(relativeTo: statusButton)
             panelWindow.orderFrontRegardless()
             startOutsideClickMonitor()
+            quotaStore.noteUserActivity()
             quotaStore.refresh()
             quotaStore.syncNotificationAuthorizationStatus()
         }
@@ -260,7 +269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stopOutsideClickMonitor()
     }
 
-    private func positionPanel(relativeTo anchorView: NSView) {
+    private func positionPanel(relativeTo anchorView: NSView, newsEnabled: Bool? = nil) {
         guard let window = anchorView.window else { return }
         let anchorRectInWindow = anchorView.convert(anchorView.bounds, to: nil)
         let anchorRect = window.convertToScreen(anchorRectInWindow)
@@ -270,9 +279,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             max(proposedX, visibleFrame.minX + PanelMetrics.screenPadding),
             visibleFrame.maxX - PanelMetrics.width - PanelMetrics.screenPadding
         )
-        let y = anchorRect.minY - PanelMetrics.height - PanelMetrics.verticalGap
+        let panelHeight = PanelMetrics.height(newsEnabled: newsEnabled ?? quotaStore.publicNewsEnabled)
+        let y = anchorRect.minY - panelHeight - PanelMetrics.verticalGap
         panelWindow?.setFrame(
-            NSRect(x: x, y: y, width: PanelMetrics.width, height: PanelMetrics.height),
+            NSRect(x: x, y: y, width: PanelMetrics.width, height: panelHeight),
             display: true
         )
     }
@@ -366,14 +376,18 @@ struct StatusPanelView: View {
                     quotaOverview
                     Divider()
                     ResetCreditsDetails(summary: store.snapshot.resetCredits)
+                    if store.publicNewsEnabled {
+                        Divider()
+                        PublicResetNewsView(state: store.publicNewsState)
+                    }
                     Spacer(minLength: 0)
                 }
                 .padding(18)
             }
-            .frame(width: PanelMetrics.cardWidth, height: PanelMetrics.cardHeight)
+            .frame(width: PanelMetrics.cardWidth, height: store.publicNewsEnabled ? PanelMetrics.newsCardHeight : PanelMetrics.cardHeight)
             .padding(PanelMetrics.windowPadding)
         }
-        .frame(width: PanelMetrics.width, height: PanelMetrics.height)
+        .frame(width: PanelMetrics.width, height: PanelMetrics.height(newsEnabled: store.publicNewsEnabled))
     }
 
     private var header: some View {
@@ -391,6 +405,7 @@ struct StatusPanelView: View {
             Spacer()
 
             RefreshIconButton(isRefreshing: store.isRefreshing) {
+                store.noteUserActivity()
                 store.refresh()
             }
 
@@ -729,6 +744,15 @@ struct ActionsPopover: View {
             .disabled(store.notificationPermissionState == .requesting)
 
             Button {
+                store.togglePublicNews()
+            } label: {
+                ActionMenuRow(systemImage: store.publicNewsEnabled ? "checkmark.circle.fill" : "circle",
+                              title: "公开重置消息", trailing: store.publicNewsEnabled ? "已开启" : "已关闭")
+            }
+            .buttonStyle(.plain)
+            .help("开启后从 AIhot 获取公开消息，不发送账户额度")
+
+            Button {
                 store.toggleLaunchAtLogin()
             } label: {
                 ActionMenuRow(
@@ -959,6 +983,8 @@ final class QuotaStore: ObservableObject {
     @Published private(set) var notificationPermissionState: NotificationPermissionState = .checking
     @Published var launchAtLoginEnabled: Bool
     @Published var settingsMessage: String?
+    @Published private(set) var publicNewsEnabled = UserDefaults.standard.bool(forKey: "publicResetNews.enabled")
+    @Published private(set) var publicNewsState: PublicResetNewsState = .loading
 
     private var timer: Timer?
     private var voiceTimer: Timer?
@@ -972,6 +998,13 @@ final class QuotaStore: ObservableObject {
     private var pendingRecoveries: [Int: QuotaRecoveryEvent] = [:]
     private var notifiedRecoveryFingerprints: [String]
     private var recoveryConfirmationScheduled = false
+    private var recoveryAccountGate = RecoveryAccountGate()
+    private var lastActivity = Date()
+    private var lastQuotaChange: Date?
+    private var lastAutomaticCheck: Date?
+    private let publicNews = PublicResetNewsService()
+    private var publicNewsTask: Task<Void, Never>?
+    private var publicNewsTimer: Timer?
     private let provider: QuotaProvider
     private var logMonitor: SessionLogMonitor?
     private var updateHandlerInstalled = false
@@ -983,11 +1016,7 @@ final class QuotaStore: ObservableObject {
         self.voiceBroadcastIntervalMinutes = Self.allowedVoiceBroadcastIntervals.contains(savedInterval) ? savedInterval : 1
         self.notificationsEnabled = UserDefaults.standard.bool(forKey: CacheKey.notificationsEnabled)
         self.launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
-        self.recoveryObservations = Dictionary(
-            uniqueKeysWithValues: (QuotaSnapshot.cached()?.quotaObservations ?? []).map {
-                ($0.windowMinutes, $0)
-            }
-        )
+        self.recoveryObservations = [:]
         self.notifiedRecoveryFingerprints = UserDefaults.standard.stringArray(
             forKey: CacheKey.notifiedRecoveryFingerprints
         ) ?? []
@@ -1004,10 +1033,12 @@ final class QuotaStore: ObservableObject {
             }
         }
         refresh()
+        if publicNewsEnabled { startPublicNews() }
         if logMonitor == nil {
             let roots = CodexSessionPaths.roots
             let monitor = SessionLogMonitor(roots: roots) { [weak self] in
                 Task { @MainActor in
+                    self?.lastActivity = Date()
                     self?.refresh()
                 }
             }
@@ -1017,7 +1048,14 @@ final class QuotaStore: ObservableObject {
         guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.refresh()
+                guard let self else { return }
+                let now = Date()
+                let interval = RefreshPolicy.interval(lastActivity: self.lastActivity, lastChange: self.lastQuotaChange,
+                                                      isLowPower: ProcessInfo.processInfo.isLowPowerModeEnabled, now: now)
+                if self.lastAutomaticCheck.map({ now.timeIntervalSince($0) >= interval }) ?? true {
+                    self.lastAutomaticCheck = now
+                    self.refresh()
+                }
             }
         }
     }
@@ -1044,7 +1082,46 @@ final class QuotaStore: ObservableObject {
         }
     }
 
+    func noteUserActivity() {
+        lastActivity = Date()
+    }
+
+    func togglePublicNews() {
+        publicNewsEnabled.toggle()
+        UserDefaults.standard.set(publicNewsEnabled, forKey: "publicResetNews.enabled")
+        if publicNewsEnabled {
+            startPublicNews()
+        } else {
+            publicNewsTimer?.invalidate()
+            publicNewsTimer = nil
+            publicNewsTask?.cancel()
+            publicNewsTask = nil
+            publicNewsState = .loading
+        }
+    }
+
+    private func startPublicNews() {
+        refreshPublicNews()
+        guard publicNewsTimer == nil else { return }
+        publicNewsTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshPublicNews() }
+        }
+    }
+
+    private func refreshPublicNews() {
+        guard publicNewsEnabled, publicNewsTask == nil else { return }
+        publicNewsTask = Task { [weak self, publicNews] in
+            let result = await publicNews.fetch()
+            guard let self, !Task.isCancelled, self.publicNewsEnabled else { return }
+            self.publicNewsState = result
+            self.publicNewsTask = nil
+        }
+    }
+
     private func apply(_ newSnapshot: QuotaSnapshot) {
+        if !newSnapshot.isUnavailable && (snapshot.remainingPercent != newSnapshot.remainingPercent || snapshot.weeklyRemainingPercent != newSnapshot.weeklyRemainingPercent || snapshot.resetDate != newSnapshot.resetDate || snapshot.weeklyResetDate != newSnapshot.weeklyResetDate) {
+            lastQuotaChange = Date()
+        }
         evaluateQuotaRecovery(in: newSnapshot)
         snapshot = newSnapshot
         newSnapshot.cache()
@@ -1296,10 +1373,18 @@ final class QuotaStore: ObservableObject {
         guard !newSnapshot.isUnavailable,
               newSnapshot.freshness != .stale,
               newSnapshot.sourceName.hasPrefix("官方") else {
+            recoveryObservations.removeAll()
+            pendingRecoveries.removeAll()
+            _ = recoveryAccountGate.canCompare(identity: nil)
             return
         }
 
         let observations = newSnapshot.quotaObservations
+        guard recoveryAccountGate.canCompare(identity: newSnapshot.accountIdentity) else {
+            pendingRecoveries.removeAll()
+            recoveryObservations = Dictionary(uniqueKeysWithValues: observations.map { ($0.windowMinutes, $0) })
+            return
+        }
         guard notificationsEnabled else {
             pendingRecoveries.removeAll()
             recoveryObservations = Dictionary(
@@ -1650,6 +1735,7 @@ final class SessionLogMonitor: @unchecked Sendable {
 struct QuotaSnapshot: Sendable {
     // Live-only: old quota caches and session logs cannot establish remaining cards.
     var resetCredits: ResetCredits? = nil
+    var accountIdentity: String? = nil
     var remainingPercent: Int
     var weeklyRemainingPercent: Int
     var resetDate: Date
@@ -1677,6 +1763,7 @@ struct QuotaSnapshot: Sendable {
         }
         let effectiveWeekly = weekly ?? primary
         resetCredits = reading.resetCredits
+        accountIdentity = reading.accountIdentity
         remainingPercent = Self.remaining(from: primary.usedPercent)
         weeklyRemainingPercent = Self.remaining(from: effectiveWeekly.usedPercent)
         resetDate = primary.resetsAt

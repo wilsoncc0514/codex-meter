@@ -1,5 +1,6 @@
 import AppKit
 import CodexMeterCore
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -109,7 +110,16 @@ final class CodexAppServerClient: @unchecked Sendable, AppServerQuotaClient {
         guard let reading = AppServerQuotaParser.parse(result: result) else {
             throw CodexAppServerError.unexpectedResponse
         }
-        return reading
+        let email = (account["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let plan = account["planType"] as? String ?? ""
+        let identity = email.flatMap { value -> String? in
+            guard !value.isEmpty else { return nil }
+            return SHA256.hash(data: Data("\(value)|\(plan)".utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+        return QuotaReading(windows: reading.windows, dataTimestamp: reading.dataTimestamp,
+                            checkedAt: reading.checkedAt, diagnostic: reading.diagnostic,
+                            quotaEventCount: reading.quotaEventCount, resetCredits: reading.resetCredits,
+                            accountIdentity: identity)
     }
 
     func setUpdateHandler(_ handler: UpdateHandler?) {
@@ -146,10 +156,14 @@ final class AppServerSession: @unchecked Sendable {
         process.standardError = errorOutput
 
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.consume(handle.availableData)
+            let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil }
+            self?.consume(data)
         }
         errorOutput.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.consumeStderr(handle.availableData)
+            let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil }
+            self?.consumeStderr(data)
         }
         process.terminationHandler = { [weak self] _ in
             self?.markClosed()
@@ -316,6 +330,7 @@ enum ChatGPTCLIExecutableLocator {
         for appURL in appURLs where seen.insert(appURL.standardizedFileURL.path).inserted {
             guard isOfficialHostBundle(appURL, fileManager: fileManager) else { continue }
             let candidates = [
+                appURL.appendingPathComponent("Contents/Resources/codex-cli/bin/codex"),
                 appURL.appendingPathComponent("Contents/Resources/codex"),
                 appURL.appendingPathComponent("Contents/Resources/codex/codex")
             ]
