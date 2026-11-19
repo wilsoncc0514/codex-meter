@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.6] - 2026-11-19
+
+- Add read-only Antigravity quota windows through its running local service.
+- WorkBuddy monitoring is not yet implemented.
+
+## [0.4.5] - 2026-11-05
+
+- Refined quota source, reset expiry, news layout, and adaptive panel scrolling.
+- Removed the empty settings window from the menu-bar application.
+
 ## [0.4.4] - 2026-10-28
 
 ### Added

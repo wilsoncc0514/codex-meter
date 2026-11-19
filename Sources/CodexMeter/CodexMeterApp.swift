@@ -9,13 +9,13 @@ import SwiftUI
 @preconcurrency import UserNotifications
 
 @main
-struct CodexMeterApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-
-    var body: some Scene {
-        Settings {
-            EmptyView()
-        }
+enum CodexMeterApp {
+    @MainActor static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.run()
+        withExtendedLifetime(delegate) {}
     }
 }
 
@@ -279,8 +279,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             max(proposedX, visibleFrame.minX + PanelMetrics.screenPadding),
             visibleFrame.maxX - PanelMetrics.width - PanelMetrics.screenPadding
         )
-        let panelHeight = PanelMetrics.height(newsEnabled: newsEnabled ?? quotaStore.publicNewsEnabled)
-        let y = anchorRect.minY - panelHeight - PanelMetrics.verticalGap
+        let desiredHeight = PanelMetrics.height(newsEnabled: newsEnabled ?? quotaStore.publicNewsEnabled)
+        let panelHeight = min(desiredHeight, max(180, anchorRect.minY - visibleFrame.minY - PanelMetrics.verticalGap - PanelMetrics.screenPadding))
+        let y = max(visibleFrame.minY + PanelMetrics.screenPadding, anchorRect.minY - panelHeight - PanelMetrics.verticalGap)
         panelWindow?.setFrame(
             NSRect(x: x, y: y, width: PanelMetrics.width, height: panelHeight),
             display: true
@@ -373,26 +374,34 @@ struct StatusPanelView: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     header
-                    quotaOverview
-                    Divider()
-                    ResetCreditsDetails(summary: store.snapshot.resetCredits)
-                    if store.publicNewsEnabled {
-                        Divider()
-                        PublicResetNewsView(state: store.publicNewsState)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            quotaOverview
+                            Divider()
+                            ResetCreditsDetails(summary: store.snapshot.resetCredits)
+                            Divider()
+                            AntigravityQuotaView(status: store.antigravityStatus)
+                            if store.publicNewsEnabled {
+                                Divider()
+                                PublicResetNewsView(state: store.publicNewsState)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    Spacer(minLength: 0)
                 }
                 .padding(18)
             }
-            .frame(width: PanelMetrics.cardWidth, height: store.publicNewsEnabled ? PanelMetrics.newsCardHeight : PanelMetrics.cardHeight)
+            .frame(width: PanelMetrics.cardWidth)
+            .frame(maxHeight: .infinity)
             .padding(PanelMetrics.windowPadding)
         }
-        .frame(width: PanelMetrics.width, height: PanelMetrics.height(newsEnabled: store.publicNewsEnabled))
+        .frame(width: PanelMetrics.width)
+        .frame(maxHeight: .infinity)
     }
 
     private var header: some View {
         HStack(alignment: .center, spacing: 8) {
-            Text("\(store.snapshot.sourceName) · \(store.snapshot.lastUpdatedText)")
+            Text("\(store.snapshot.compactSource) · \(store.snapshot.compactUpdateTime)")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(
                     store.snapshot.isUnavailable
@@ -461,56 +470,8 @@ struct PanelGlassBackground: View {
         let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
 
         ZStack {
-            shape
-                .fill(.ultraThinMaterial)
-
-            shape
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.64),
-                            Color(red: 0.82, green: 0.94, blue: 1.0).opacity(0.48),
-                            Color.white.opacity(0.30)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-
-            Ellipse()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            Color.white.opacity(0.84),
-                            Color(red: 0.90, green: 0.98, blue: 1.0).opacity(0.32),
-                            Color.clear
-                        ],
-                        center: .center,
-                        startRadius: 4,
-                        endRadius: 82
-                    )
-                )
-                .frame(width: 130, height: 150)
-                .offset(x: 130, y: -56)
-                .blur(radius: 4)
-
-            shape
-                .stroke(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.68),
-                            Color.white.opacity(0.38),
-                            Color(red: 0.42, green: 0.70, blue: 0.88).opacity(0.20)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-
-            shape
-                .stroke(Color.white.opacity(0.22), lineWidth: 0.7)
-                .padding(1.2)
+            shape.fill(.regularMaterial)
+            shape.stroke(Color.primary.opacity(0.10), lineWidth: 1)
         }
         .clipShape(shape)
         .shadow(color: Color.black.opacity(0.12), radius: 18, x: 0, y: 10)
@@ -521,12 +482,12 @@ private extension View {
     func notificationInsetSurface(cornerRadius: CGFloat) -> some View {
         background {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(Color.white.opacity(0.28))
+                .fill(Color.primary.opacity(0.05))
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(Color.white.opacity(0.28), lineWidth: 0.8)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 0.8)
         )
     }
 
@@ -985,6 +946,7 @@ final class QuotaStore: ObservableObject {
     @Published var settingsMessage: String?
     @Published private(set) var publicNewsEnabled = UserDefaults.standard.bool(forKey: "publicResetNews.enabled")
     @Published private(set) var publicNewsState: PublicResetNewsState = .loading
+    @Published private(set) var antigravityStatus: AntigravityStatus = .loading
 
     private var timer: Timer?
     private var voiceTimer: Timer?
@@ -1003,6 +965,8 @@ final class QuotaStore: ObservableObject {
     private var lastQuotaChange: Date?
     private var lastAutomaticCheck: Date?
     private let publicNews = PublicResetNewsService()
+    private let antigravity = AntigravityQuotaService()
+    private var antigravityTask: Task<Void, Never>?
     private var publicNewsTask: Task<Void, Never>?
     private var publicNewsTimer: Timer?
     private let provider: QuotaProvider
@@ -1061,6 +1025,7 @@ final class QuotaStore: ObservableObject {
     }
 
     func refresh() {
+        refreshAntigravity()
         guard isRefreshing == false else { return }
         isRefreshing = true
         let provider = provider
@@ -1079,6 +1044,16 @@ final class QuotaStore: ObservableObject {
                     self.speak(self.snapshot)
                 }
             }
+        }
+    }
+
+    private func refreshAntigravity() {
+        guard antigravityTask == nil else { return }
+        antigravityTask = Task { [weak self, antigravity] in
+            let result = await antigravity.fetch()
+            guard let self else { return }
+            self.antigravityStatus = result
+            self.antigravityTask = nil
         }
     }
 
@@ -1733,6 +1708,17 @@ final class SessionLogMonitor: @unchecked Sendable {
 }
 
 struct QuotaSnapshot: Sendable {
+    var compactSource: String {
+        if sourceName.hasPrefix("官方") { return "实时" }
+        if sourceName.contains("日志") { return "日志降级" }
+        if sourceName.contains("缓存") { return "缓存" }
+        return sourceName
+    }
+
+    var compactUpdateTime: String {
+        guard !isUnavailable else { return "未获取" }
+        return "更新于 \(checkedAt.formatted(date: .omitted, time: .shortened))"
+    }
     // Live-only: old quota caches and session logs cannot establish remaining cards.
     var resetCredits: ResetCredits? = nil
     var accountIdentity: String? = nil

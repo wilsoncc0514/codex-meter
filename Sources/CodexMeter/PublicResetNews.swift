@@ -144,11 +144,11 @@ struct PublicResetNewsView: View {
             case .empty: Text("暂无有效公开消息").foregroundStyle(.secondary)
             case let .event(event, stale):
                 Text("\(event.status == "confirmed" ? "已报道" : "预告") · \(event.title)\(stale ? " · 可能过期" : "")")
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .foregroundStyle(event.status == "confirmed" ? Color.green : Color.orange)
                 if event.status == "announced", let schedule = event.schedule {
                     Text("预计：\(schedule.from.formatted(date: .abbreviated, time: .shortened)) – \(schedule.through.formatted(date: .abbreviated, time: .shortened))")
-                        .lineLimit(1)
+                        .lineLimit(2)
                         .foregroundStyle(.secondary)
                 } else if event.status == "confirmed", let date = event.confirmedAt {
                     Text("报道时间：\(date.formatted(date: .abbreviated, time: .shortened))")

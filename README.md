@@ -8,7 +8,7 @@
 
 [![macOS](https://img.shields.io/badge/macOS-14%2B-blue)](#系统要求)
 [![Swift](https://img.shields.io/badge/Swift-6.0-orange)](Package.swift)
-[![Version](https://img.shields.io/badge/version-0.4.4%20build%2018-17a673)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.6%20build%2020-17a673)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
@@ -21,7 +21,13 @@
 
 它没有自己的后端；实时查询只使用 OpenAI Codex.app（兼容旧版 ChatGPT.app 宿主）内置 CLI 的现有登录状态。不会调用 PATH、Homebrew 或其他独立 `codex` CLI。实时查询不可用时，会自动降级读取本机会话日志。
 
-当前版本包含实时 5 小时与周额度、刷新时的状态栏额度轮播、重置卡到期时间、可选公开重置消息、本地日志/缓存回退、额度恢复通知、登录时启动和隐私安全诊断。
+当前版本包含 Codex 实时 5 小时与周额度、Antigravity 本地额度、重置卡到期时间、可选公开重置消息、本地日志/缓存回退、额度恢复通知、登录时启动和隐私安全诊断。WorkBuddy 监控尚未实现。
+
+## 0.4.6 更新
+
+- 读取正在运行的 Antigravity 本地服务，分组显示可用额度和恢复时间。
+- 改善面板数据来源、到期时间和公开消息的可读性，修复空白设置窗口。
+- WorkBuddy 额度监控仍在研究，当前版本不支持。
 
 ## 0.4.4 更新
 
@@ -115,6 +121,8 @@ CODEX_METER_UNIVERSAL=1 ./scripts/package-release.sh
 ```
 
 ## 数据从哪里来
+
+Antigravity 额度来自正在运行的 Antigravity 本地服务。应用读取本机服务连接信息，通过回环地址进行只读查询；连接令牌不保存、不显示，额度与 Codex 分开展示。Antigravity 未运行、接口变更或数据无法识别时显示不可用，不推测余额。该接口并非公开稳定协议。实现参考了 [TokenBar](https://github.com/wuruoye/TokenBar)（MIT）。
 
 “更多 → 公开重置消息”默认关闭。开启后每 15 分钟向第三方 [AIhot 重置监控](https://aihot.news/codex-reset) 请求公开报道；请求不携带账户、额度或会话数据，但第三方可见正常网络连接信息。消息不是 OpenAI 的账户权益确认，不影响额度结果。请求失败时会提示不可用或标记上次消息可能过期；遇到限流会退避。关闭后停止请求。
 
