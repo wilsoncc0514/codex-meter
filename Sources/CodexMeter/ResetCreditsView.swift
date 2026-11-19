@@ -23,7 +23,7 @@ struct ResetCreditsDetails: View {
                                     Text("\(index + 1).").foregroundStyle(.secondary)
                                     VStack(alignment: .leading, spacing: 2) {
                                         if let expiry = credit.expiresAt {
-                                            Text("到期：\(expiry.formatted(.dateTime.year().month().day().hour().minute().timeZone()))")
+                                            Text("\(Self.expiryText(expiry)) 到期")
                                                 .foregroundStyle(.secondary)
                                             if expiry <= Date() {
                                                 Text("已到期，请刷新确认可用次数")
@@ -41,6 +41,9 @@ struct ResetCreditsDetails: View {
                         }
                     }
                     .frame(height: min(CGFloat(credits.count) * 44, 88))
+                    if credits.count > 2 {
+                        Text("共 \(credits.count) 张，可滚动查看").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
                 }
                 if summary.availableCount > 0 && (summary.credits == nil || summary.detailsIncomplete) {
                     Text("接口未提供完整明细；可用次数以服务端为准。")
@@ -54,5 +57,15 @@ struct ResetCreditsDetails: View {
         .font(.system(size: 12))
         .padding(.horizontal, 4)
         .accessibilityElement(children: .contain)
+    }
+
+    static func expiryText(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = .current
+        formatter.timeZone = calendar.timeZone
+        formatter.setLocalizedDateFormatFromTemplate(sameYear ? "MMMdjmm" : "yMMMdjmm")
+        return formatter.string(from: date)
     }
 }
